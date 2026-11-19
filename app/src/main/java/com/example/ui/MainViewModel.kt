@@ -25,6 +25,7 @@ import com.example.data.seed.HadithItem
 import com.example.data.seed.HadithSeedData
 import com.example.data.seed.QuranCatalog
 import com.example.data.seed.RuqyahAudioTrack
+import com.example.data.seed.SurahInfo
 import com.example.firebase.AuthManager
 import com.example.firebase.FirebaseSyncRepository
 import com.example.prayer.CalculationMethod
@@ -47,6 +48,22 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+
+sealed interface SurahListUiState {
+    data object Loading : SurahListUiState
+    data class Success(
+        val surahs: List<SurahInfo>,
+        val isRefreshing: Boolean = false,
+        val syncError: String? = null
+    ) : SurahListUiState
+    data class Error(val message: String) : SurahListUiState
+}
+
+private data class SurahSyncStatus(
+    val isLoading: Boolean = true,
+    val isRefreshing: Boolean = false,
+    val errorMessage: String? = null
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -104,6 +121,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         PrayerTimeCalculator.calculateQiblaBearing(prefs.latitude, prefs.longitude)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 94.0)
 
+    private val _surahSyncStatus = MutableStateFlow(SurahSyncStatus())
+
+    val surahListState: StateFlow<SurahListUiState> = combine(
+        repository.observeSurahs(),
+        _surahSyncStatus
+    ) { surahs, sync ->
+        when {
+            surahs.isNotEmpty() -> SurahListUiState.Success(
+                surahs = surahs,
+                isRefreshing = sync.isRefreshing,
+                syncError = sync.errorMessage
+            )
+            sync.isLoading || sync.isRefreshing -> SurahListUiState.Loading
+            !sync.errorMessage.isNullOrBlank() -> SurahListUiState.Error(sync.errorMessage)
+            else -> SurahListUiState.Loading
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, SurahListUiState.Loading)
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
@@ -115,6 +150,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         viewModelScope.launch {
             repository.ensureStarterDataSeeded()
+            _surahSyncStatus.value = SurahSyncStatus(isLoading = false, isRefreshing = true, errorMessage = null)
+            syncSurahCatalogInternal(forceRefresh = false)
             PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
         }
         viewModelScope.launch {
@@ -175,6 +212,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearBanner() {
         _statusBanner.value = null
+    }
+
+    fun dismissSurahSyncError() {
+        _surahSyncStatus.value = _surahSyncStatus.value.copy(errorMessage = null)
+    }
+
+    fun retryLoadSurahs() {
+        viewModelScope.launch {
+            _surahSyncStatus.value = SurahSyncStatus(isLoading = true, isRefreshing = true, errorMessage = null)
+            repository.ensureStarterDataSeeded()
+            syncSurahCatalogInternal(forceRefresh = true)
+        }
+    }
+
+    private suspend fun syncSurahCatalogInternal(forceRefresh: Boolean) {
+        val result = repository.syncSurahCatalog(forceRefresh = forceRefresh)
+        val isAr = prefsState.value.language == "ar"
+        _surahSyncStatus.value = result.fold(
+            onSuccess = {
+                SurahSyncStatus(isLoading = false, isRefreshing = false, errorMessage = null)
+            },
+            onFailure = { err ->
+                val msg = if (isAr) {
+                    "تعذر تحديث قائمة السور من الخادم، يتم عرض البيانات المحفوظة محلياً."
+                } else {
+                    err.localizedMessage ?: "Unable to refresh Surahs from network; showing local catalog."
+                }
+                SurahSyncStatus(
+                    isLoading = false,
+                    isRefreshing = false,
+                    errorMessage = if (forceRefresh) msg else null
+                )
+            }
+        )
     }
 
     fun setLanguage(lang: String) {
@@ -334,11 +405,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     surahNumber = surahNumber,
                     repeatMode = RepeatMode.CONTINUOUS
                 )
-            }.onFailure {
-                _statusBanner.value = if (prefsState.value.language == "ar") {
-                    "يرجى الاتصال بالإنترنت لتشغيل التلاوة أو تحميلها أولاً"
-                } else {
-                    "Connect to the internet to stream or download this recitation."
+            }.onFailure { err ->
+                val isAr = prefsState.value.language == "ar"
+                _statusBanner.value = when {
+                    err.message == QuranAndHadithRepository.RECITER_SURAH_UNAVAILABLE_CODE -> {
+                        if (isAr) "تسجيل هذه السورة غير متوفر حالياً بصوت القارئ عبدالله بن موسى"
+                        else "This Surah recording is currently unavailable for Abdullah bin Mousa."
+                    }
+                    isAr -> "يرجى الاتصال بالإنترنت لتشغيل التلاوة أو تحميلها أولاً"
+                    else -> "Connect to the internet to stream or download this recitation."
                 }
             }
         }

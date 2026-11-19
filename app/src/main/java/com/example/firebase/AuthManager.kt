@@ -30,7 +30,12 @@ import kotlinx.coroutines.withContext
 object AuthManager {
     private const val TAG = "SoufianAuth"
 
-    fun authStateFlow(auth: FirebaseAuth = Firebase.auth): Flow<FirebaseUser?> = callbackFlow {
+    fun authStateFlow(auth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()): Flow<FirebaseUser?> = callbackFlow {
+        if (auth == null) {
+            trySend(null)
+            awaitClose {}
+            return@callbackFlow
+        }
         val listener = FirebaseAuth.AuthStateListener { firebaseAuth ->
             trySend(firebaseAuth.currentUser)
         }
@@ -45,7 +50,8 @@ object AuthManager {
         onAuthSuccess: () -> Unit,
         onUnauthenticated: () -> Unit
     ) {
-        if (Firebase.auth.currentUser != null) {
+        val currentUser = runCatching { Firebase.auth.currentUser }.getOrNull()
+        if (currentUser != null) {
             onAuthSuccess()
             return
         }

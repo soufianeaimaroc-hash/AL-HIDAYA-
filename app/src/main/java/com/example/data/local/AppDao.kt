@@ -8,6 +8,15 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface QuranCacheDao {
+    @Query("SELECT * FROM cached_surahs ORDER BY number ASC")
+    fun observeCachedSurahs(): Flow<List<CachedSurahEntity>>
+
+    @Query("SELECT * FROM cached_surahs ORDER BY number ASC")
+    suspend fun getCachedSurahsOnce(): List<CachedSurahEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertSurahs(surahs: List<CachedSurahEntity>)
+
     @Query("SELECT * FROM cached_ayahs WHERE surahNumber = :surahNumber ORDER BY ayahNumber ASC")
     fun observeSurahAyahs(surahNumber: Int): Flow<List<CachedSurahAyahEntity>>
 

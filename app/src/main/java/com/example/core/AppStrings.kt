@@ -144,7 +144,12 @@ data class Strings(
     val retry: String,
     val loading: String,
     val noResults: String,
-    val backLabel: String
+    val backLabel: String,
+    val loadingSurahs: String,
+    val surahLoadError: String,
+    val refreshSurahsLabel: String,
+    val surahSyncOfflineHint: String,
+    val reciterSurahUnavailable: String
 )
 
 object AppStrings {
@@ -290,7 +295,12 @@ object AppStrings {
         retry = "إعادة المحاولة",
         loading = "جارٍ التحميل...",
         noResults = "لا توجد نتائج مطابقة",
-        backLabel = "رجوع"
+        backLabel = "رجوع",
+        loadingSurahs = "جارٍ تحميل قائمة السور (114 سورة)...",
+        surahLoadError = "تعذر تحميل قائمة سور القرآن الكريم، يرجى المحاولة مرة أخرى.",
+        refreshSurahsLabel = "تحديث قائمة السور",
+        surahSyncOfflineHint = "يتم عرض الفهرس المحفوظ محلياً دون إنترنت",
+        reciterSurahUnavailable = "تسجيل هذه السورة غير متوفر حالياً بصوت القارئ عبدالله بن موسى"
     )
 
     val English = Strings(
@@ -435,7 +445,12 @@ object AppStrings {
         retry = "Retry",
         loading = "Loading...",
         noResults = "No matching results",
-        backLabel = "Back"
+        backLabel = "Back",
+        loadingSurahs = "Loading all 114 Surahs...",
+        surahLoadError = "Unable to load the Holy Quran Surahs list. Please try again.",
+        refreshSurahsLabel = "Refresh Surah Catalog",
+        surahSyncOfflineHint = "Showing locally saved Surah catalog offline",
+        reciterSurahUnavailable = "This Surah recording is currently unavailable for Abdullah bin Mousa"
     )
 
     fun forLanguage(code: String): Strings = if (code == "en") English else Arabic

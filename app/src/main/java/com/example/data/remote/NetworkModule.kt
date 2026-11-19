@@ -13,7 +13,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
 
 object NetworkModule {
-    private val moshi: Moshi by lazy {
+    internal val moshi: Moshi by lazy {
         Moshi.Builder()
             .addLast(KotlinJsonAdapterFactory())
             .build()
@@ -21,6 +21,13 @@ object NetworkModule {
 
     val okHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request().newBuilder()
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "SoufianIslamAndroid/1.0")
+                    .build()
+                chain.proceed(request)
+            }
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .build()

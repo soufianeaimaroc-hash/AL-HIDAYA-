@@ -173,4 +173,52 @@ class ExampleUnitTest {
         assertTrue(merged.first().englishTranslation.isNotBlank())
         assertTrue(merged.first().arabicTafsir.isNotBlank())
     }
+
+    @Test
+    fun `moshi parses nullable and empty quran and mp3quran json payloads without JsonDataException`() {
+        val moshi = com.example.data.remote.NetworkModule.moshi
+
+        val surahListAdapter = moshi.adapter(com.example.data.remote.AlQuranSurahListResponse::class.java)
+        val parsedList = surahListAdapter.fromJson(
+            """{"code":200,"status":"OK","data":[{"number":1,"name":null,"englishName":"Al-Faatiha","numberOfAyahs":7,"revelationType":"Meccan"}]}"""
+        )
+        assertEquals(200, parsedList?.code)
+        assertEquals(1, parsedList?.data?.size)
+        val normalizedCatalog = com.example.data.QuranAndHadithRepository.parseSurahListFromApiDtos(
+            dtos = parsedList?.data,
+            fallbackCatalog = QuranCatalog.surahs
+        )
+        assertEquals(114, normalizedCatalog.size)
+        assertEquals("الفاتحة", normalizedCatalog.first().arabicName)
+        assertEquals(7, normalizedCatalog.first().ayahCount)
+
+        val emptyErrorResp = surahListAdapter.fromJson("""{"code":500,"status":"FAIL","data":null}""")
+        assertEquals(500, emptyErrorResp?.code)
+        assertTrue(
+            com.example.data.QuranAndHadithRepository.parseSurahListFromApiDtos(emptyErrorResp?.data).isEmpty()
+        )
+
+        val editionsAdapter = moshi.adapter(com.example.data.remote.AlQuranEditionsResponse::class.java)
+        val editionsNullData = editionsAdapter.fromJson("""{"code":404,"status":"NOT FOUND","data":null}""")
+        assertEquals(404, editionsNullData?.code)
+        assertEquals(null, editionsNullData?.data)
+
+        val recitersAdapter = moshi.adapter(com.example.data.remote.Mp3QuranRecitersResponse::class.java)
+        val recitersResp = recitersAdapter.fromJson(
+            """{"reciters":[{"id":99,"name":"عبدالله بن موسى","moshaf":[{"id":1,"name":null,"server":"http://server.example.com/mousa/","surah_total":null,"surah_list":"1,2,114"}]}]}"""
+        )
+        assertEquals(1, recitersResp?.reciters?.size)
+        val parsedSet = com.example.data.QuranAndHadithRepository.parseAvailableSurahList(
+            recitersResp?.reciters?.first()?.moshaf?.first()?.surahList
+        )
+        assertEquals(setOf(1, 2, 114), parsedSet)
+        val queue = com.example.data.QuranAndHadithRepository.buildSurahQueueList(
+            startSurah = 1,
+            serverUrl = recitersResp?.reciters?.first()?.moshaf?.first()?.server,
+            localFiles = emptyMap(),
+            availableSurahs = parsedSet
+        )
+        assertEquals(listOf(1, 2, 114), queue.map { it.first })
+    }
 }
+

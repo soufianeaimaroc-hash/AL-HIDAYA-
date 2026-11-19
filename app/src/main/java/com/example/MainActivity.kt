@@ -118,6 +118,7 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
     val downloadedKeys by viewModel.downloadedAudioKeys.collectAsStateWithLifecycle()
     val downloadingKeys by viewModel.downloadingKeys.collectAsStateWithLifecycle()
     val cachedSurahs by viewModel.cachedSurahNumbers.collectAsStateWithLifecycle()
+    val surahListState by viewModel.surahListState.collectAsStateWithLifecycle()
     val audioState by viewModel.audioState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
 
@@ -289,10 +290,13 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                             composable(Routes.QURAN) {
                                 QuranScreen(
                                     prefs = prefs,
+                                    surahListState = surahListState,
                                     bookmarks = bookmarks,
                                     cachedSurahs = cachedSurahs,
                                     downloadedKeys = downloadedKeys,
                                     downloadingKeys = downloadingKeys,
+                                    onRetryLoadSurahs = viewModel::retryLoadSurahs,
+                                    onDismissSurahSyncError = viewModel::dismissSurahSyncError,
                                     onOpenSurah = { surahNum, pageMode ->
                                         navController.navigate(Routes.surahReader(surahNum, pageMode))
                                     },

@@ -22,25 +22,34 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 
 class FirebaseSyncRepository(
-    private val db: FirebaseFirestore,
-    private val auth: FirebaseAuth = Firebase.auth
+    private val db: FirebaseFirestore?,
+    private val auth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
 ) {
     constructor(context: Context) : this(
-        FirebaseFirestore.getInstance(
-            context.applicationContext.getString(R.string.firestore_database_id)
-        )
+        runCatching {
+            FirebaseFirestore.getInstance(
+                context.applicationContext.getString(R.string.firestore_database_id)
+            )
+        }.getOrNull()
     )
 
+    private fun requireDb(): FirebaseFirestore =
+        db ?: throw IllegalStateException("Firebase Firestore is not initialized.")
+
     private fun requireUserId(): String {
-        return auth.currentUser?.uid?.takeIf { it.isNotBlank() }
+        return auth?.currentUser?.uid?.takeIf { it.isNotBlank() }
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
     }
 
     fun observeBookmarks(userId: String): Flow<List<BookmarkDoc>> = flow {
         require(userId.isNotBlank()) { "userId must not be blank" }
+        val firestore = db ?: run {
+            emit(emptyList())
+            return@flow
+        }
         val path = "users/$userId/bookmarks"
         emitAll(
-            db.collection("users").document(userId).collection("bookmarks")
+            firestore.collection("users").document(userId).collection("bookmarks")
                 .snapshots()
                 .map { snapshot ->
                     snapshot.toObjects(
@@ -54,7 +63,7 @@ class FirebaseSyncRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val toLog = firestoreError ?: (error as? Exception)
-                    if (toLog != null && auth.currentUser?.uid == userId) {
+                    if (toLog != null && auth?.currentUser?.uid == userId) {
                         handleFirestoreError(toLog, OperationType.LIST, path)
                     }
                     throw error
@@ -64,9 +73,13 @@ class FirebaseSyncRepository(
 
     fun observeUserProfile(userId: String): Flow<UserProfileDoc?> = flow {
         require(userId.isNotBlank()) { "userId must not be blank" }
+        val firestore = db ?: run {
+            emit(null)
+            return@flow
+        }
         val path = "users/$userId"
         emitAll(
-            db.collection("users").document(userId)
+            firestore.collection("users").document(userId)
                 .snapshots()
                 .map { snapshot ->
                     if (snapshot.exists()) {
@@ -82,7 +95,7 @@ class FirebaseSyncRepository(
                         .firstOrNull()
                     if (firestoreError == null && error is CancellationException) throw error
                     val toLog = firestoreError ?: (error as? Exception)
-                    if (toLog != null && auth.currentUser?.uid == userId) {
+                    if (toLog != null && auth?.currentUser?.uid == userId) {
                         handleFirestoreError(toLog, OperationType.GET, path)
                     }
                     throw error
@@ -94,8 +107,9 @@ class FirebaseSyncRepository(
         var docPath = "users/unauthenticated"
         return try {
             val uid = requireUserId()
+            val firestore = requireDb()
             docPath = "users/$uid"
-            val docRef = db.collection("users").document(uid)
+            val docRef = firestore.collection("users").document(uid)
             val existingSnap = docRef.get().await()
             val safeName = displayName.trim().ifBlank { "Muslim User" }.take(100)
             val safeCity = prefs.cityNameEn.trim().ifBlank { "Casablanca" }.take(100)
@@ -152,8 +166,9 @@ class FirebaseSyncRepository(
         var docPath = "users/unauthenticated/bookmarks/$safeKey"
         return try {
             val uid = requireUserId()
+            val firestore = requireDb()
             docPath = "users/$uid/bookmarks/$safeKey"
-            val docRef = db.collection("users").document(uid).collection("bookmarks").document(safeKey)
+            val docRef = firestore.collection("users").document(uid).collection("bookmarks").document(safeKey)
             val existingSnap = docRef.get().await()
 
             val safeTitle = bookmark.title.trim().ifBlank { "Bookmark" }.take(200)
@@ -196,8 +211,9 @@ class FirebaseSyncRepository(
         var docPath = "users/unauthenticated/bookmarks/$safeKey"
         return try {
             val uid = requireUserId()
+            val firestore = requireDb()
             docPath = "users/$uid/bookmarks/$safeKey"
-            db.collection("users").document(uid).collection("bookmarks").document(safeKey)
+            firestore.collection("users").document(uid).collection("bookmarks").document(safeKey)
                 .delete().await()
             Result.success(Unit)
         } catch (e: CancellationException) {
@@ -209,18 +225,19 @@ class FirebaseSyncRepository(
     }
 
     suspend fun syncAdhkarProgress(progress: AdhkarProgressEntity): Result<Unit> {
-        val safeId = sanitizeDocId(progress.categoryId)
+        val safeId = sanitizeDocId(progress.categoryId).take(60)
         var docPath = "users/unauthenticated/adhkar_progress/$safeId"
         return try {
             val uid = requireUserId()
+            val firestore = requireDb()
             docPath = "users/$uid/adhkar_progress/$safeId"
-            val docRef = db.collection("users").document(uid).collection("adhkar_progress").document(safeId)
+            val docRef = firestore.collection("users").document(uid).collection("adhkar_progress").document(safeId)
             val existingSnap = docRef.get().await()
             if (!existingSnap.exists()) {
                 docRef.set(
                     mapOf(
                         "userId" to uid,
-                        "categoryId" to safeId.take(60),
+                        "categoryId" to safeId,
                         "completedCount" to progress.completedCount.coerceAtLeast(0).toLong(),
                         "targetCount" to progress.targetCount.coerceAtLeast(1).toLong(),
                         "createdAt" to FieldValue.serverTimestamp(),
@@ -246,6 +263,6 @@ class FirebaseSyncRepository(
     }
 
     private fun sanitizeDocId(raw: String): String {
-        return raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(120).ifBlank { "item_1" }
+        return raw.replace(Regex("[^a-zA-Z0-9_\\-]"), "_").take(100).ifBlank { "item_1" }
     }
 }

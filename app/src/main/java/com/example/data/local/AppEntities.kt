@@ -3,6 +3,19 @@ package com.example.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
+@Entity(tableName = "cached_surahs")
+data class CachedSurahEntity(
+    @PrimaryKey val number: Int,
+    val arabicName: String,
+    val englishName: String,
+    val englishTranslation: String,
+    val ayahCount: Int,
+    val isMeccan: Boolean,
+    val startJuz: Int,
+    val startPage: Int,
+    val syncedAtMillis: Long = 0L
+)
+
 @Entity(tableName = "cached_ayahs")
 data class CachedSurahAyahEntity(
     @PrimaryKey val globalKey: String, // "{surah}_{ayah}"

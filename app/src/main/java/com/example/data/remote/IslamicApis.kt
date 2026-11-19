@@ -9,76 +9,108 @@ import retrofit2.http.Query
 // --- AlQuran Cloud API ---
 
 @JsonClass(generateAdapter = true)
+data class AlQuranSurahListResponse(
+    val code: Int? = null,
+    val status: String? = null,
+    val data: List<AlQuranSurahMetaDto>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AlQuranSurahMetaDto(
+    val number: Int? = null,
+    val name: String? = null,
+    val englishName: String? = null,
+    val englishNameTranslation: String? = null,
+    val numberOfAyahs: Int? = null,
+    val revelationType: String? = null
+)
+
+@JsonClass(generateAdapter = true)
 data class AlQuranEditionsResponse(
-    val code: Int = 0,
-    val status: String = "",
-    val data: List<AlQuranSurahEdition> = emptyList()
+    val code: Int? = null,
+    val status: String? = null,
+    val data: List<AlQuranSurahEdition>? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class AlQuranSingleSurahResponse(
+    val code: Int? = null,
+    val status: String? = null,
+    val data: AlQuranSurahEdition? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranPageResponse(
-    val code: Int = 0,
-    val status: String = "",
+    val code: Int? = null,
+    val status: String? = null,
     val data: AlQuranPageData? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranPageData(
-    val number: Int = 1,
-    val ayahs: List<AlQuranAyahDto> = emptyList()
+    val number: Int? = null,
+    val ayahs: List<AlQuranAyahDto>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranSurahEdition(
-    val number: Int = 0,
-    val name: String = "",
-    val englishName: String = "",
-    val ayahs: List<AlQuranAyahDto> = emptyList()
+    val number: Int? = null,
+    val name: String? = null,
+    val englishName: String? = null,
+    val ayahs: List<AlQuranAyahDto>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranAyahDto(
-    val number: Int = 0,
-    val text: String = "",
-    val numberInSurah: Int = 0,
-    val juz: Int = 1,
-    val hizbQuarter: Int = 1,
-    val page: Int = 1,
+    val number: Int? = null,
+    val text: String? = null,
+    val numberInSurah: Int? = null,
+    val juz: Int? = null,
+    val hizbQuarter: Int? = null,
+    val page: Int? = null,
     val surah: AlQuranMiniSurahDto? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranMiniSurahDto(
-    val number: Int = 0,
-    val name: String = "",
-    val englishName: String = ""
+    val number: Int? = null,
+    val name: String? = null,
+    val englishName: String? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranSearchResponse(
-    val code: Int = 0,
+    val code: Int? = null,
     val data: AlQuranSearchData? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranSearchData(
-    val count: Int = 0,
-    val matches: List<AlQuranSearchMatch> = emptyList()
+    val count: Int? = null,
+    val matches: List<AlQuranSearchMatch>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class AlQuranSearchMatch(
-    val number: Int = 0,
-    val text: String = "",
-    val numberInSurah: Int = 1,
+    val number: Int? = null,
+    val text: String? = null,
+    val numberInSurah: Int? = null,
     val surah: AlQuranMiniSurahDto? = null
 )
 
 interface AlQuranCloudApi {
+    @GET("surah")
+    suspend fun getSurahList(): AlQuranSurahListResponse
+
     @GET("surah/{surahNumber}/editions/quran-uthmani,en.sahih,ar.muyassar")
     suspend fun getSurahWithTafsirAndTranslation(
         @Path("surahNumber") surahNumber: Int
     ): AlQuranEditionsResponse
+
+    @GET("surah/{surahNumber}/quran-uthmani")
+    suspend fun getSingleSurahUthmani(
+        @Path("surahNumber") surahNumber: Int
+    ): AlQuranSingleSurahResponse
 
     @GET("page/{pageNumber}/quran-uthmani")
     suspend fun getMushafPage(
@@ -95,23 +127,23 @@ interface AlQuranCloudApi {
 
 @JsonClass(generateAdapter = true)
 data class Mp3QuranRecitersResponse(
-    val reciters: List<Mp3QuranReciterDto> = emptyList()
+    val reciters: List<Mp3QuranReciterDto>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class Mp3QuranReciterDto(
-    val id: Int = 0,
-    val name: String = "",
-    val moshaf: List<Mp3QuranMoshafDto> = emptyList()
+    val id: Int? = null,
+    val name: String? = null,
+    val moshaf: List<Mp3QuranMoshafDto>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class Mp3QuranMoshafDto(
-    val id: Int = 0,
-    val name: String = "",
-    val server: String = "",
-    @Json(name = "surah_total") val surahTotal: Int = 0,
-    @Json(name = "surah_list") val surahList: String = ""
+    val id: Int? = null,
+    val name: String? = null,
+    val server: String? = null,
+    @Json(name = "surah_total") val surahTotal: Int? = null,
+    @Json(name = "surah_list") val surahList: String? = null
 )
 
 interface Mp3QuranApi {
