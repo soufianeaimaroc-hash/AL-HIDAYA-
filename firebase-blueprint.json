@@ -1,0 +1,91 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Synced preferences and Quran reading progress for an authenticated SOUFIAN ISLAM user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "displayName": { "type": "string", "description": "Display name of the user." },
+        "language": { "type": "string", "enum": ["ar", "en"], "description": "App UI language." },
+        "themeMode": { "type": "string", "enum": ["system", "light", "dark"], "description": "Selected theme mode." },
+        "cityName": { "type": "string", "description": "Selected city name for prayer times and Qibla." },
+        "latitude": { "type": "number", "description": "City or GPS latitude." },
+        "longitude": { "type": "number", "description": "City or GPS longitude." },
+        "calculationMethod": {
+          "type": "string",
+          "enum": ["MOROCCO", "MWL", "UMM_AL_QURA", "ISNA", "EGYPT", "KARACHI", "DUBAI"],
+          "description": "Prayer time calculation method."
+        },
+        "quranFontSize": { "type": "integer", "description": "Quran Arabic text font size in sp." },
+        "lastSurahNumber": { "type": "integer", "description": "Last read Surah number (1-114)." },
+        "lastAyahNumber": { "type": "integer", "description": "Last read Ayah number." },
+        "lastSurahName": { "type": "string", "description": "Last read Surah Arabic name." },
+        "tasbihTotalCount": { "type": "integer", "description": "Total lifetime Tasbih count." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update server timestamp." }
+      },
+      "required": [
+        "userId",
+        "displayName",
+        "language",
+        "themeMode",
+        "cityName",
+        "latitude",
+        "longitude",
+        "calculationMethod",
+        "quranFontSize",
+        "lastSurahNumber",
+        "lastAyahNumber",
+        "lastSurahName",
+        "tasbihTotalCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Bookmark": {
+      "title": "Bookmark",
+      "description": "Saved favorite Quran verse, Hadith, or Dhikr belonging to the user.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "itemType": { "type": "string", "enum": ["QURAN", "HADITH", "DHIKR"], "description": "Category of favorite item." },
+        "title": { "type": "string", "description": "Item title or Surah/Book reference." },
+        "subtitle": { "type": "string", "description": "Translation or narrator subtitle." },
+        "arabicText": { "type": "string", "description": "Arabic script of the bookmarked item." },
+        "referenceKey": { "type": "string", "description": "Stable unique key e.g. quran_2_255." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Update server timestamp." }
+      },
+      "required": ["userId", "itemType", "title", "subtitle", "arabicText", "referenceKey", "createdAt", "updatedAt"]
+    },
+    "AdhkarProgress": {
+      "title": "AdhkarProgress",
+      "description": "User progress on an Adhkar category.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Firebase Auth UID of the owner." },
+        "categoryId": { "type": "string", "description": "Category identifier e.g. morning, evening." },
+        "completedCount": { "type": "integer", "description": "Completed repetitions." },
+        "targetCount": { "type": "integer", "description": "Total target repetitions." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation server timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Update server timestamp." }
+      },
+      "required": ["userId", "categoryId", "completedCount", "targetCount", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User settings, location, and reading progress document."
+    },
+    "/users/{userId}/bookmarks/{bookmarkId}": {
+      "schema": { "$ref": "#/entities/Bookmark" },
+      "description": "User-scoped Quran, Hadith, and Adhkar bookmarks."
+    },
+    "/users/{userId}/adhkar_progress/{progressId}": {
+      "schema": { "$ref": "#/entities/AdhkarProgress" },
+      "description": "User-scoped Adhkar completion progress."
+    }
+  }
+}
