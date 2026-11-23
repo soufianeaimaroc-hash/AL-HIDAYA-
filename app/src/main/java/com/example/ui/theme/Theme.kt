@@ -66,7 +66,7 @@ private val SoufianShapes = Shapes(
 )
 
 @Composable
-fun SoufianIslamTheme(
+fun AlHidayaTheme(
     themeMode: String = "system",
     language: String = "ar",
     content: @Composable () -> Unit

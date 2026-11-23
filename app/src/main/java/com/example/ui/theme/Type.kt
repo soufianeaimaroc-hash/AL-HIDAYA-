@@ -10,13 +10,13 @@ import com.example.R
 
 val AmiriFontFamily = FontFamily(
     Font(R.font.amiri, FontWeight.Normal),
-    Font(R.font.amiri, FontWeight.Bold)
+    Font(R.font.amiri_bold, FontWeight.Bold)
 )
 
 val TajawalFontFamily = FontFamily(
     Font(R.font.tajawal, FontWeight.Normal),
     Font(R.font.tajawal, FontWeight.Medium),
-    Font(R.font.tajawal, FontWeight.Bold)
+    Font(R.font.tajawal_bold, FontWeight.Bold)
 )
 
 val PlayfairFontFamily = FontFamily(

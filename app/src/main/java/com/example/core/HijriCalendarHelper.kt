@@ -39,7 +39,7 @@ object HijriCalendarHelper {
             "$hDay ${hijriMonthsEn[hMonthIndex]} $hYear AH"
         }
 
-        val locale = if (language == "ar") Locale("ar", "MA") else Locale.ENGLISH
+        val locale = if (language == "ar") Locale.forLanguageTag("ar-MA") else Locale.ENGLISH
         val pattern = if (language == "ar") "EEEE، d MMMM yyyy" else "EEEE, dd MMM yyyy"
         val gregText = SimpleDateFormat(pattern, locale).format(date)
 

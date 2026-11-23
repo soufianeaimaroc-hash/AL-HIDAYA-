@@ -20,12 +20,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Refresh
@@ -416,7 +416,7 @@ fun QuranScreen(
                                             .testTag("quran_open_mushaf_pages")
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Filled.MenuBook,
+                                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
                                             contentDescription = null,
                                             tint = GoldRoyal,
                                             modifier = Modifier.size(20.dp)
@@ -582,7 +582,7 @@ fun QuranScreen(
 
                     1 -> {
                         items(QuranCatalog.juzList, key = { it.number }) { juz ->
-                            val startSurah = QuranCatalog.surahs[juz.startSurah - 1]
+                            val startSurah = QuranCatalog.surahs.getOrNull(juz.startSurah - 1) ?: QuranCatalog.surahs.first()
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -614,7 +614,7 @@ fun QuranScreen(
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
                                     }
-                                    Icon(Icons.Filled.MenuBook, contentDescription = null, tint = GoldRoyal)
+                                    Icon(Icons.AutoMirrored.Filled.MenuBook, contentDescription = null, tint = GoldRoyal)
                                 }
                             }
                         }
@@ -695,5 +695,5 @@ fun QuranScreen(
     }
 }
 }
-
+}
 

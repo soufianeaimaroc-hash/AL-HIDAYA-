@@ -15,6 +15,7 @@ import com.example.audio.AudioPlaybackService
 import com.example.data.local.UserPrefsState
 import com.example.data.local.UserPreferencesDataStore
 import com.example.data.seed.AdhanCatalog
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -28,41 +29,73 @@ object PrayerNotificationScheduler {
     const val EXTRA_IS_REMINDER = "extra_is_reminder"
     const val EXTRA_ADHAN_ID = "extra_adhan_id"
     const val EXTRA_LANGUAGE = "extra_language"
+    const val EXTRA_PLAY_ADHAN_SOUND = "extra_play_adhan_sound"
+
+    fun canScheduleExactAlarms(context: Context): Boolean {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            alarmManager.canScheduleExactAlarms()
+        } else {
+            true
+        }
+    }
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val adhanChannel = NotificationChannel(
                 CHANNEL_ADHAN,
-                "Adhan Alerts • تنبيهات الأذان",
+                "AL HIDAYA – الهداية • تنبيهات الأذان",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Scheduled prayer time Adhan notifications"
+                description = "AL HIDAYA – الهداية: Scheduled prayer time Adhan notifications"
                 enableVibration(true)
             }
             val reminderChannel = NotificationChannel(
                 CHANNEL_REMINDER,
-                "Pre-Prayer Reminders • تذكير قبل الصلاة",
+                "AL HIDAYA – الهداية • تذكير قبل الصلاة",
                 NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
-                description = "10-minute pre-prayer preparation reminders"
+                description = "AL HIDAYA – الهداية: 10-minute pre-prayer preparation reminders"
             }
-            nm.createNotificationChannel(adhanChannel)
-            nm.createNotificationChannel(reminderChannel)
+            runCatching {
+                nm.createNotificationChannel(adhanChannel)
+                nm.createNotificationChannel(reminderChannel)
+            }
         }
     }
 
     fun scheduleDailyPrayers(context: Context, prefs: UserPrefsState) {
         ensureChannels(context)
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
         val method = CalculationMethod.fromId(prefs.calculationMethod)
+        val madhab = AsrMadhab.fromId(prefs.asrMadhab)
+        val offsets = prefs.toPrayerMinuteOffsets()
+        val timeZone = com.example.data.seed.CitiesCatalog.findTimeZone(
+            cityNameEn = prefs.cityNameEn,
+            latitude = prefs.latitude,
+            longitude = prefs.longitude,
+            preferredTimeZoneId = prefs.timeZoneId,
+            countryCode = prefs.countryCode
+        )
         val now = System.currentTimeMillis()
-        val schedule = PrayerTimeCalculator.calculateDailySchedule(
+        val todaySchedule = PrayerTimeCalculator.calculateDailySchedule(
             latitude = prefs.latitude,
             longitude = prefs.longitude,
             method = method,
             nowMillis = now,
-            timeZone = com.example.data.seed.CitiesCatalog.findTimeZone(prefs.cityNameEn, prefs.latitude, prefs.longitude)
+            timeZone = timeZone,
+            madhab = madhab,
+            offsets = offsets
+        )
+        val tomorrowSchedule = PrayerTimeCalculator.calculateDailySchedule(
+            latitude = prefs.latitude,
+            longitude = prefs.longitude,
+            method = method,
+            nowMillis = now + 86_400_000L,
+            timeZone = timeZone,
+            madhab = madhab,
+            offsets = offsets
         )
 
         val prayerConfigs = listOf(
@@ -74,10 +107,12 @@ object PrayerNotificationScheduler {
         )
 
         prayerConfigs.forEachIndexed { idx, (type, enabled, adhanId) ->
-            val entry = schedule.prayers.firstOrNull { it.type == type } ?: return@forEachIndexed
-            var targetMillis = entry.timeMillis
-            if (targetMillis <= now) {
-                targetMillis += 86_400_000L // schedule for tomorrow
+            val todayEntry = todaySchedule.prayers.firstOrNull { it.type == type } ?: return@forEachIndexed
+            val tomorrowEntry = tomorrowSchedule.prayers.firstOrNull { it.type == type }
+            val targetMillis = if (todayEntry.timeMillis > now) {
+                todayEntry.timeMillis
+            } else {
+                tomorrowEntry?.timeMillis ?: (todayEntry.timeMillis + 86_400_000L)
             }
 
             val adhanCode = 100 + idx
@@ -85,16 +120,32 @@ object PrayerNotificationScheduler {
 
             if (enabled) {
                 scheduleAlarm(
-                    context, alarmManager, adhanCode, targetMillis,
-                    type.key, isReminder = false, adhanId = adhanId, language = prefs.language
+                    context = context,
+                    alarmManager = alarmManager,
+                    requestCode = adhanCode,
+                    triggerAtMillis = targetMillis,
+                    prayerKey = type.key,
+                    isReminder = false,
+                    adhanId = adhanId,
+                    language = prefs.language,
+                    playAdhanSound = prefs.playAdhanOnNotification
                 )
                 if (prefs.prePrayerReminderEnabled) {
                     val reminderMillis = targetMillis - 10 * 60_000L
                     if (reminderMillis > now) {
                         scheduleAlarm(
-                            context, alarmManager, reminderCode, reminderMillis,
-                            type.key, isReminder = true, adhanId = adhanId, language = prefs.language
+                            context = context,
+                            alarmManager = alarmManager,
+                            requestCode = reminderCode,
+                            triggerAtMillis = reminderMillis,
+                            prayerKey = type.key,
+                            isReminder = true,
+                            adhanId = adhanId,
+                            language = prefs.language,
+                            playAdhanSound = false
                         )
+                    } else {
+                        cancelAlarm(context, alarmManager, reminderCode)
                     }
                 } else {
                     cancelAlarm(context, alarmManager, reminderCode)
@@ -114,13 +165,15 @@ object PrayerNotificationScheduler {
         prayerKey: String,
         isReminder: Boolean,
         adhanId: String,
-        language: String
+        language: String,
+        playAdhanSound: Boolean
     ) {
         val intent = Intent(context, PrayerAlarmReceiver::class.java).apply {
             putExtra(EXTRA_PRAYER_KEY, prayerKey)
             putExtra(EXTRA_IS_REMINDER, isReminder)
             putExtra(EXTRA_ADHAN_ID, adhanId)
             putExtra(EXTRA_LANGUAGE, language)
+            putExtra(EXTRA_PLAY_ADHAN_SOUND, playAdhanSound)
         }
         val pi = PendingIntent.getBroadcast(
             context,
@@ -135,7 +188,9 @@ object PrayerNotificationScheduler {
                 alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
             }
         } catch (_: SecurityException) {
-            alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi)
+            runCatching { alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi) }
+        } catch (_: Exception) {
+            runCatching { alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, pi) }
         }
     }
 
@@ -160,6 +215,7 @@ class PrayerAlarmReceiver : BroadcastReceiver() {
         val isReminder = intent.getBooleanExtra(PrayerNotificationScheduler.EXTRA_IS_REMINDER, false)
         val adhanId = intent.getStringExtra(PrayerNotificationScheduler.EXTRA_ADHAN_ID) ?: "adhan_makkah"
         val language = intent.getStringExtra(PrayerNotificationScheduler.EXTRA_LANGUAGE) ?: "ar"
+        val playAdhanSound = intent.getBooleanExtra(PrayerNotificationScheduler.EXTRA_PLAY_ADHAN_SOUND, true)
 
         val prayerType = PrayerType.entries.firstOrNull { it.key == prayerKey } ?: PrayerType.FAJR
         val prayerName = if (language == "ar") prayerType.nameAr else prayerType.nameEn
@@ -186,36 +242,47 @@ class PrayerAlarmReceiver : BroadcastReceiver() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         val channel = if (isReminder) PrayerNotificationScheduler.CHANNEL_REMINDER else PrayerNotificationScheduler.CHANNEL_ADHAN
         val notification = NotificationCompat.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_mosque_notif)
+            .setSubText("AL HIDAYA – الهداية")
             .setContentTitle(title)
             .setContentText(body)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setAutoCancel(true)
             .setContentIntent(contentPi)
             .build()
-        nm.notify(prayerKey.hashCode() + if (isReminder) 1 else 0, notification)
+        try {
+            nm?.notify(prayerKey.hashCode() + if (isReminder) 1 else 0, notification)
+        } catch (_: SecurityException) {
+        } catch (_: Exception) {}
 
         if (!isReminder) {
-            val track = AdhanCatalog.findById(adhanId)
-            val localFile = File(File(context.filesDir, "adhan_audio"), "${track.id}.mp3")
-            val source = if (localFile.exists()) localFile.absolutePath else track.audioUrl
-            AudioPlaybackService.startPlay(
-                context = context,
-                urlOrPath = source,
-                title = title,
-                subtitle = body
-            )
-            // Reschedule next day's alarms
+            if (playAdhanSound) {
+                try {
+                    val track = AdhanCatalog.findById(adhanId)
+                    val localFile = File(File(context.filesDir, "adhan_audio"), "${track.id}.mp3")
+                    val source = if (localFile.exists()) localFile.absolutePath else track.audioUrl
+                    AudioPlaybackService.startPlay(
+                        context = context,
+                        urlOrPath = source,
+                        title = title,
+                        subtitle = body,
+                        trackId = track.id
+                    )
+                } catch (_: Exception) {}
+            }
+            // Reschedule next day's alarms cleanly
             val pendingResult = goAsync()
-            CoroutineScope(Dispatchers.IO).launch {
+            val handler = CoroutineExceptionHandler { _, _ -> runCatching { pendingResult.finish() } }
+            CoroutineScope(Dispatchers.IO + handler).launch {
                 try {
                     val prefs = UserPreferencesDataStore(context).prefsFlow.first()
                     PrayerNotificationScheduler.scheduleDailyPrayers(context, prefs)
+                } catch (_: Exception) {
                 } finally {
-                    pendingResult.finish()
+                    runCatching { pendingResult.finish() }
                 }
             }
         }
@@ -224,14 +291,22 @@ class PrayerAlarmReceiver : BroadcastReceiver() {
 
 class BootCompletedReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+        val action = intent.action ?: return
+        val relevant = action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_TIME_CHANGED ||
+            action == Intent.ACTION_TIMEZONE_CHANGED ||
+            action == Intent.ACTION_DATE_CHANGED ||
+            action == Intent.ACTION_MY_PACKAGE_REPLACED
+        if (relevant) {
             val pendingResult = goAsync()
-            CoroutineScope(Dispatchers.IO).launch {
+            val handler = CoroutineExceptionHandler { _, _ -> runCatching { pendingResult.finish() } }
+            CoroutineScope(Dispatchers.IO + handler).launch {
                 try {
                     val prefs = UserPreferencesDataStore(context).prefsFlow.first()
                     PrayerNotificationScheduler.scheduleDailyPrayers(context, prefs)
+                } catch (_: Exception) {
                 } finally {
-                    pendingResult.finish()
+                    runCatching { pendingResult.finish() }
                 }
             }
         }

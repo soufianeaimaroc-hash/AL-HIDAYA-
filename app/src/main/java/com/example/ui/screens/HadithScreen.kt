@@ -221,7 +221,7 @@ fun HadithScreen(
                                         }
                                         IconButton(
                                             onClick = {
-                                                onShareText("${item.arabicText}\n\n${item.englishText}\n(${item.bookNameAr} - ${item.hadithNumber}) - SOUFIAN ISLAM")
+                                                onShareText("${item.arabicText}\n\n${item.englishText}\n(${item.bookNameAr} - ${item.hadithNumber}) - AL HIDAYA – الهداية")
                                             },
                                             modifier = Modifier.size(48.dp)
                                         ) {

@@ -24,20 +24,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,13 +65,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.audio.AudioPlaybackService
 import com.example.audio.AudioPlaybackState
+import com.example.audio.RepeatMode
 import com.example.core.LocalAppStrings
 import com.example.data.local.AdhkarProgressEntity
 import com.example.data.local.BookmarkEntity
 import com.example.data.local.UserPrefsState
 import com.example.data.seed.AdhkarData
 import com.example.data.seed.RuqyahAudioTrack
-import com.example.data.seed.RuqyahCatalog
+import com.example.data.seed.RuqyahCategory
 import com.example.ui.components.GoldOrnamentalDivider
 import com.example.ui.theme.AmiriFontFamily
 import com.example.ui.theme.EmeraldDeep
@@ -95,12 +90,23 @@ fun AdhkarAndTasbihScreen(
     audioState: AudioPlaybackState,
     downloadedKeys: Set<String>,
     downloadingKeys: Set<String>,
+    selectedRuqyahCategory: RuqyahCategory? = null,
+    activeRuqyahTrackId: String = "",
     onUpdateCategoryProgress: (String, Int, Int) -> Unit,
     onIncrementTasbih: (Int) -> Unit,
     onSetTasbihTarget: (Int) -> Unit,
     onToggleBookmark: (String, String, String, String, String) -> Unit,
     onPlayRuqyah: (RuqyahAudioTrack) -> Unit,
-    onDownloadRuqyah: (RuqyahAudioTrack) -> Unit
+    onDownloadRuqyah: (RuqyahAudioTrack) -> Unit,
+    onSelectRuqyahCategory: (RuqyahCategory?) -> Unit = {},
+    onSelectRuqyahReciterEdition: (String) -> Unit = {},
+    onResumeLastRuqyah: () -> Unit = {},
+    onSeekAudioTo: (Long) -> Unit = {},
+    onSeekAudioBy: (Long) -> Unit = {},
+    onSetAudioVolume: (Float) -> Unit = {},
+    onSetSleepTimerMinutes: (Int) -> Unit = {},
+    onSetRepeatConfig: (RepeatMode, Int?) -> Unit = { _, _ -> },
+    onShareText: (String) -> Unit = {}
 ) {
     val s = LocalAppStrings.current
     val context = LocalContext.current
@@ -116,26 +122,32 @@ fun AdhkarAndTasbihScreen(
     var ttsReady by remember { mutableStateOf(false) }
     val tts = remember {
         var instance: TextToSpeech? = null
-        instance = TextToSpeech(context) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                instance?.language = Locale("ar")
-                ttsReady = true
+        try {
+            instance = TextToSpeech(context) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    runCatching { instance?.language = Locale.forLanguageTag("ar") }
+                    ttsReady = true
+                }
             }
+        } catch (_: Exception) {
+            ttsReady = false
         }
         instance
     }
 
     LaunchedEffect(audioState.isPlaying) {
         if (audioState.isPlaying && speakingItemId != null) {
-            tts.stop()
+            runCatching { tts?.stop() }
             speakingItemId = null
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            tts.stop()
-            tts.shutdown()
+            runCatching {
+                tts?.stop()
+                tts?.shutdown()
+            }
         }
     }
 
@@ -171,7 +183,8 @@ fun AdhkarAndTasbihScreen(
 
             Spacer(Modifier.height(12.dp))
 
-            if (selectedTab == 0) {
+            when (selectedTab) {
+                0 -> {
                 // Category chips
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -283,18 +296,23 @@ fun AdhkarAndTasbihScreen(
                                             IconButton(
                                                 onClick = {
                                                     if (speakingItemId == item.id) {
-                                                        tts.stop()
+                                                        runCatching { tts?.stop() }
                                                         speakingItemId = null
                                                     } else {
                                                         AudioPlaybackService.pauseIfPlaying(context)
                                                         speakingItemId = item.id
-                                                        tts.speak(item.arabicText, TextToSpeech.QUEUE_FLUSH, null, item.id)
+                                                        val spoken = runCatching {
+                                                            tts?.speak(item.arabicText, TextToSpeech.QUEUE_FLUSH, null, item.id)
+                                                        }.getOrDefault(TextToSpeech.ERROR)
+                                                        if (spoken == TextToSpeech.ERROR) {
+                                                            speakingItemId = null
+                                                        }
                                                     }
                                                 },
                                                 modifier = Modifier.size(48.dp)
                                             ) {
                                                 Icon(
-                                                    if (speakingItemId == item.id) Icons.Filled.Stop else Icons.Filled.VolumeUp,
+                                                    if (speakingItemId == item.id) Icons.Filled.Stop else Icons.AutoMirrored.Filled.VolumeUp,
                                                     contentDescription = s.listenDhikr,
                                                     tint = MaterialTheme.colorScheme.primary
                                                 )
@@ -346,309 +364,136 @@ fun AdhkarAndTasbihScreen(
                         }
                     }
                 }
-            } else {
-                // Electronic Tasbih Counter
-                val phrases = listOf(
-                    "سُبْحَانَ اللَّهِ",
-                    "الْحَمْدُ لِلَّهِ",
-                    "اللَّهُ أَكْبَرُ",
-                    "لَا إِلَهَ إِلَّا اللَّهُ",
-                    "أَسْتَغْفِرُ اللَّهَ",
-                    "اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ"
-                )
-                var selectedPhrase by remember { mutableStateOf(phrases.first()) }
-                var sessionCount by remember { mutableIntStateOf(0) }
-
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(vertical = 8.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(phrases) { phrase ->
-                            FilterChip(
-                                selected = selectedPhrase == phrase,
-                                onClick = {
-                                    selectedPhrase = phrase
-                                    sessionCount = 0
-                                },
-                                label = { Text(phrase, fontFamily = AmiriFontFamily, fontSize = 16.sp) }
-                            )
-                        }
-                    }
-
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(33, 99, 100, 1000).forEach { target ->
-                            FilterChip(
-                                selected = prefs.tasbihTarget == target,
-                                onClick = { onSetTasbihTarget(target) },
-                                label = { Text("${s.tasbihTarget}: $target") }
-                            )
-                        }
-                    }
-
-                    // Tactile Luxury Circular Counter Button
-                    Box(
-                        modifier = Modifier
-                            .size(230.dp)
-                            .clip(CircleShape)
-                            .background(Brush.radialGradient(listOf(EmeraldPrimary, EmeraldDeep)))
-                            .clickable {
-                                sessionCount += 1
-                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                onIncrementTasbih(1)
-                            }
-                            .testTag("tasbih_tap_circle"),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(
-                                text = selectedPhrase,
-                                fontFamily = AmiriFontFamily,
-                                fontSize = 24.sp,
-                                color = GoldChampagne,
-                                textAlign = TextAlign.Center,
-                                modifier = Modifier.padding(horizontal = 12.dp)
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                text = sessionCount.toString().padStart(3, '0'),
-                                style = MaterialTheme.typography.displayLarge,
-                                fontWeight = FontWeight.Bold,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "/ ${prefs.tasbihTarget}",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = GoldChampagne.copy(alpha = 0.85f)
-                            )
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(s.tasbihTotal, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Text(
-                                text = prefs.tasbihTotalCount.toString(),
-                                style = MaterialTheme.typography.headlineMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-
-                        Button(
-                            onClick = { sessionCount = 0 },
-                            modifier = Modifier.testTag("tasbih_reset_button")
-                        ) {
-                            Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(s.resetProgress)
-                        }
-                    }
                 }
-            }
-            if (selectedTab == 2) {
-                // Authentic Ruqyah Shariah Section (Audio + Verified Texts)
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    item {
-                        Card(
-                            shape = RoundedCornerShape(20.dp),
-                            border = BorderStroke(1.dp, GoldRoyal.copy(alpha = 0.55f))
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .background(Brush.linearGradient(listOf(EmeraldDeep, EmeraldPrimary)))
-                                    .padding(16.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Filled.Shield, null, tint = GoldChampagne, modifier = Modifier.size(28.dp))
-                                    Spacer(Modifier.width(10.dp))
-                                    Column {
-                                        Text(
-                                            text = s.ruqyahTitle,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold,
-                                            color = GoldChampagne
-                                        )
-                                        Text(
-                                            text = if (isAr) "الرقية الشرعية بالصوت والنص من القرآن الكريم والسنة الصحيحة" else "Authentic Audio & Text Ruqyah from Quran & Sahih Sunnah",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = Color.White.copy(alpha = 0.85f)
-                                        )
-                                    }
-                                }
+                1 -> {
+                    // Electronic Tasbih Counter
+                    val phrases = listOf(
+                        "سُبْحَانَ اللَّهِ",
+                        "الْحَمْدُ لِلَّهِ",
+                        "اللَّهُ أَكْبَرُ",
+                        "لَا إِلَهَ إِلَّا اللَّهُ",
+                        "أَسْتَغْفِرُ اللَّهَ",
+                        "اللَّهُمَّ صَلِّ عَلَى مُحَمَّدٍ"
+                    )
+                    var selectedPhrase by remember { mutableStateOf(phrases.first()) }
+                    var sessionCount by remember { mutableIntStateOf(0) }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(vertical = 8.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(phrases) { phrase ->
+                                FilterChip(
+                                    selected = selectedPhrase == phrase,
+                                    onClick = {
+                                        selectedPhrase = phrase
+                                        sessionCount = 0
+                                    },
+                                    label = { Text(phrase, fontFamily = AmiriFontFamily, fontSize = 16.sp) }
+                                )
                             }
                         }
-                    }
 
-                    items(RuqyahCatalog.audioTracks, key = { it.id }) { track ->
-                        val isTrackActive = audioState.title == (if (isAr) track.titleAr else track.titleEn) && audioState.isPlaying
-                        val isSavedOffline = downloadedKeys.contains(track.id)
-                        val isTrackDownloading = downloadingKeys.contains(track.id)
-                        Card(
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            listOf(33, 99, 100, 1000).forEach { target ->
+                                FilterChip(
+                                    selected = prefs.tasbihTarget == target,
+                                    onClick = { onSetTasbihTarget(target) },
+                                    label = { Text("${s.tasbihTarget}: $target") }
+                                )
+                            }
+                        }
+
+                        // Tactile Luxury Circular Counter Button
+                        Box(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("ruqyah_audio_${track.id}"),
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = BorderStroke(1.dp, if (isTrackActive) GoldRoyal else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(8.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = if (isAr) track.titleAr else track.titleEn,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = if (isAr) track.reciterAr else track.reciterEn,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            color = MaterialTheme.colorScheme.primary
-                                        )
-                                    }
-                                    Row {
-                                        IconButton(
-                                            onClick = {
-                                                if (isTrackActive) AudioPlaybackService.togglePause(context)
-                                                else onPlayRuqyah(track)
-                                            },
-                                            modifier = Modifier
-                                                .size(48.dp)
-                                                .testTag("play_ruqyah_${track.id}")
-                                        ) {
-                                            Icon(
-                                                if (isTrackActive) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                                contentDescription = s.playSurah,
-                                                tint = GoldRoyal
-                                            )
-                                        }
-                                        IconButton(
-                                            onClick = { onDownloadRuqyah(track) },
-                                            modifier = Modifier.size(48.dp)
-                                        ) {
-                                            when {
-                                                isTrackDownloading -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                                                isSavedOffline -> Icon(Icons.Filled.CheckCircle, s.downloadedOffline, tint = GoldRoyal)
-                                                else -> Icon(Icons.Filled.CloudDownload, s.downloadOffline)
-                                            }
-                                        }
-                                    }
+                                .size(230.dp)
+                                .clip(CircleShape)
+                                .background(Brush.radialGradient(listOf(EmeraldPrimary, EmeraldDeep)))
+                                .clickable {
+                                    sessionCount += 1
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    onIncrementTasbih(1)
                                 }
+                                .testTag("tasbih_tap_circle"),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Text(
-                                    text = if (isAr) track.descriptionAr else track.descriptionEn,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    text = selectedPhrase,
+                                    fontFamily = AmiriFontFamily,
+                                    fontSize = 24.sp,
+                                    color = GoldChampagne,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.padding(horizontal = 12.dp)
+                                )
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    text = sessionCount.toString().padStart(3, '0'),
+                                    style = MaterialTheme.typography.displayLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
                                 )
                                 Text(
-                                    text = if (isAr) track.sourceAttributionAr else track.sourceAttributionEn,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    text = "/ ${prefs.tasbihTarget}",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = GoldChampagne.copy(alpha = 0.85f)
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(s.tasbihTotal, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    text = prefs.tasbihTotalCount.toString(),
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
-                        }
-                    }
 
-                    items(RuqyahCatalog.ruqyahItems, key = { it.id }) { item ->
-                        val bmKey = "ruqyah_${item.id}"
-                        val isSaved = bookmarks.any { it.referenceKey == bmKey }
-                        Card(
-                            shape = RoundedCornerShape(18.dp),
-                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                            border = BorderStroke(0.8.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                Text(
-                                    text = item.arabicText,
-                                    fontFamily = AmiriFontFamily,
-                                    fontSize = 20.sp,
-                                    lineHeight = 34.sp,
-                                    textAlign = TextAlign.Right,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                                if (!isAr) {
-                                    Text(
-                                        text = item.englishTranslation,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                GoldOrnamentalDivider()
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text(
-                                        text = if (isAr) item.sourceAr else item.sourceEn,
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    Row {
-                                        if (ttsReady) {
-                                            IconButton(
-                                                onClick = {
-                                                    if (speakingItemId == item.id) {
-                                                        tts.stop()
-                                                        speakingItemId = null
-                                                    } else {
-                                                        AudioPlaybackService.pauseIfPlaying(context)
-                                                        speakingItemId = item.id
-                                                        tts.speak(item.arabicText, TextToSpeech.QUEUE_FLUSH, null, item.id)
-                                                    }
-                                                },
-                                                modifier = Modifier.size(48.dp)
-                                            ) {
-                                                Icon(
-                                                    if (speakingItemId == item.id) Icons.Filled.Stop else Icons.Filled.VolumeUp,
-                                                    contentDescription = s.listenDhikr,
-                                                    tint = MaterialTheme.colorScheme.primary
-                                                )
-                                            }
-                                        }
-                                        IconButton(
-                                            onClick = {
-                                                onToggleBookmark(
-                                                    bmKey,
-                                                    "DHIKR",
-                                                    if (isAr) item.sourceAr else item.sourceEn,
-                                                    item.englishTranslation,
-                                                    item.arabicText
-                                                )
-                                            },
-                                            modifier = Modifier.size(48.dp)
-                                        ) {
-                                            Icon(
-                                                if (isSaved) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
-                                                contentDescription = s.saveBookmark,
-                                                tint = if (isSaved) GoldRoyal else MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                        }
-                                    }
-                                }
+                            Button(
+                                onClick = { sessionCount = 0 },
+                                modifier = Modifier.testTag("tasbih_reset_button")
+                            ) {
+                                Icon(Icons.Filled.Refresh, null, Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(s.resetProgress)
                             }
                         }
                     }
+                }
+                else -> {
+                    RuqyahLibraryContent(
+                        prefs = prefs,
+                        audioState = audioState,
+                        bookmarks = bookmarks,
+                        downloadedKeys = downloadedKeys,
+                        downloadingKeys = downloadingKeys,
+                        selectedCategory = selectedRuqyahCategory,
+                        activeRuqyahTrackId = activeRuqyahTrackId,
+                        onSelectCategory = onSelectRuqyahCategory,
+                        onSelectReciterEdition = onSelectRuqyahReciterEdition,
+                        onPlayRuqyah = onPlayRuqyah,
+                        onResumeLastRuqyah = onResumeLastRuqyah,
+                        onDownloadRuqyah = onDownloadRuqyah,
+                        onSeekTo = onSeekAudioTo,
+                        onSeekBy = onSeekAudioBy,
+                        onSetVolume = onSetAudioVolume,
+                        onSetSleepTimerMinutes = onSetSleepTimerMinutes,
+                        onSetRepeatConfig = onSetRepeatConfig,
+                        onToggleBookmark = onToggleBookmark,
+                        onShareText = onShareText
+                    )
                 }
             }
         }

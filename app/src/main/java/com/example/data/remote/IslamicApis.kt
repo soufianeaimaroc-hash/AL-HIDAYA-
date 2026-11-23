@@ -198,19 +198,22 @@ interface HadithCdnApi {
 
 @JsonClass(generateAdapter = true)
 data class ArchiveMetadataResponse(
-    val d1: String = "",
-    val dir: String = "",
-    val files: List<ArchiveFileDto> = emptyList()
+    val d1: String? = null,
+    val dir: String? = null,
+    val files: List<ArchiveFileDto>? = null
 )
 
 @JsonClass(generateAdapter = true)
 data class ArchiveFileDto(
-    val name: String = "",
-    val format: String = ""
+    val name: String? = null,
+    val format: String? = null,
+    val length: String? = null,
+    val size: String? = null
 )
 
 interface ArchiveOrgApi {
     @GET("metadata/{identifier}")
     suspend fun getItemMetadata(@Path("identifier") identifier: String): ArchiveMetadataResponse
 }
+
 

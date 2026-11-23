@@ -23,12 +23,12 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
@@ -75,6 +75,7 @@ import com.example.ui.theme.GoldChampagne
 import com.example.ui.theme.GoldRoyal
 import com.example.core.LocalAppStrings
 import java.util.Calendar
+import java.util.Locale
 
 private data class QuickServiceItem(
     val id: String,
@@ -113,11 +114,11 @@ fun HomeScreen(
         val h = totalSec / 3600
         val m = (totalSec % 3600) / 60
         val sec = totalSec % 60
-        String.format("%02d:%02d:%02d", h, m, sec)
+        String.format(Locale.US, "%02d:%02d:%02d", h, m, sec)
     }
 
     val services = listOf(
-        QuickServiceItem("quran", s.quranTitle, Icons.Filled.MenuBook, EmeraldPrimary, onNavigateQuran),
+        QuickServiceItem("quran", s.quranTitle, Icons.AutoMirrored.Filled.MenuBook, EmeraldPrimary, onNavigateQuran),
         QuickServiceItem("adhkar", s.adhkarTitle, Icons.Filled.VolunteerActivism, Color(0xFF147D52), onNavigateAdhkar),
         QuickServiceItem("hadith", s.hadithTitle, Icons.Outlined.AutoStories, Color(0xFF9E7B1C), onNavigateHadith),
         QuickServiceItem("qibla", s.qiblaTitle, Icons.Filled.Explore, Color(0xFF0E6E58), onNavigateQibla),
@@ -149,8 +150,8 @@ fun HomeScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Image(
-                            painter = painterResource(id = R.drawable.soufian_emblem),
-                            contentDescription = "SOUFIAN ISLAM Emblem",
+                            painter = painterResource(id = R.drawable.img_al_hidaya_emblem),
+                            contentDescription = s.appName,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .size(42.dp)
@@ -197,8 +198,15 @@ fun HomeScreen(
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
+                            val cityLabel = if (isAr) prefs.cityName else prefs.cityNameEn
+                            val countryLabel = if (isAr) prefs.countryNameAr else prefs.countryNameEn
+                            val combinedLoc = if (countryLabel.isNotBlank() && !cityLabel.contains(countryLabel)) {
+                                "$cityLabel • $countryLabel"
+                            } else {
+                                cityLabel
+                            }
                             Text(
-                                text = if (isAr) prefs.cityName else prefs.cityNameEn,
+                                text = combinedLoc,
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = Color.White,
@@ -299,10 +307,19 @@ fun HomeScreen(
                             ) {
                                 items(schedule.prayers) { entry ->
                                     val isNext = entry.type == schedule.nextPrayer.type
+                                    val isCurrent = schedule.currentPrayer?.type == entry.type
                                     Surface(
                                         shape = RoundedCornerShape(14.dp),
-                                        color = if (isNext) GoldRoyal else Color.White.copy(alpha = 0.12f),
-                                        border = if (isNext) null else BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f)),
+                                        color = when {
+                                            isNext -> GoldRoyal
+                                            isCurrent -> Color.White.copy(alpha = 0.24f)
+                                            else -> Color.White.copy(alpha = 0.12f)
+                                        },
+                                        border = when {
+                                            isNext -> null
+                                            isCurrent -> BorderStroke(1.dp, GoldChampagne.copy(alpha = 0.7f))
+                                            else -> BorderStroke(0.5.dp, Color.White.copy(alpha = 0.2f))
+                                        },
                                         modifier = Modifier.clickable(onClick = onNavigateAdhan)
                                     ) {
                                         Column(
@@ -313,7 +330,7 @@ fun HomeScreen(
                                                 text = if (isAr) entry.type.nameAr else entry.type.nameEn,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 fontWeight = FontWeight.SemiBold,
-                                                color = if (isNext) EmeraldDeep else Color.White.copy(alpha = 0.85f)
+                                                color = if (isNext) EmeraldDeep else Color.White.copy(alpha = 0.9f)
                                             )
                                             Spacer(modifier = Modifier.height(2.dp))
                                             Text(
@@ -386,7 +403,7 @@ fun HomeScreen(
                 QuickServiceTile(
                     item = QuickServiceItem(
                         id = "ruqyah",
-                        title = s.ruqyahTitle,
+                        title = s.ruqyahScreenTitle,
                         icon = Icons.Filled.Shield,
                         accent = EmeraldDeep,
                         onClick = onNavigateRuqyah
@@ -422,7 +439,7 @@ fun HomeScreen(
                         )
                     },
                     onShareClick = {
-                        onShareText("${ayahOfDay.arabicText}\n\n${ayahOfDay.englishText}\n(${ayahOfDay.surahNameAr}: ${ayahOfDay.ayahNumber}) - SOUFIAN ISLAM")
+                        onShareText("${ayahOfDay.arabicText}\n\n${ayahOfDay.englishText}\n(${ayahOfDay.surahNameAr}: ${ayahOfDay.ayahNumber}) - AL HIDAYA – الهداية")
                     }
                 )
             }
@@ -448,7 +465,7 @@ fun HomeScreen(
                         )
                     },
                     onShareClick = {
-                        onShareText("${duaOfDay.arabicText}\n\n${duaOfDay.englishText}\n(${duaOfDay.sourceAr}) - SOUFIAN ISLAM")
+                        onShareText("${duaOfDay.arabicText}\n\n${duaOfDay.englishText}\n(${duaOfDay.sourceAr}) - AL HIDAYA – الهداية")
                     }
                 )
             }

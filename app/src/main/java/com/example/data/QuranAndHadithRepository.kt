@@ -1,27 +1,43 @@
 package com.example.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import com.example.audio.QueueTrack
 import com.example.data.local.AppDatabase
 import com.example.data.local.CachedSurahAyahEntity
 import com.example.data.local.CachedSurahEntity
 import com.example.data.local.DownloadedAudioEntity
 import com.example.data.local.UserPreferencesDataStore
 import com.example.data.remote.AlQuranSurahMetaDto
+import com.example.data.remote.ArchiveMetadataResponse
 import com.example.data.remote.NetworkModule
 import com.example.data.seed.AdhanTrack
+import com.example.data.seed.BundledQuranLoader
 import com.example.data.seed.HadithBookInfo
 import com.example.data.seed.HadithItem
 import com.example.data.seed.HadithSeedData
 import com.example.data.seed.QuranCatalog
+import com.example.data.seed.RuqyahAudioSource
 import com.example.data.seed.RuqyahAudioTrack
+import com.example.data.seed.RuqyahCatalog
 import com.example.data.seed.SurahInfo
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.net.URLEncoder
+
+data class RuqyahQueuePlan(
+    val tracks: List<QueueTrack>,
+    val resolvedReciterNameAr: String,
+    val resolvedReciterNameEn: String,
+    val loopWholeQueue: Boolean
+)
 
 class QuranAndHadithRepository(
     private val context: Context,
@@ -30,7 +46,7 @@ class QuranAndHadithRepository(
 ) {
     private val quranDao = db.quranCacheDao()
     private val downloadedDao = db.downloadedAudioDao()
-    private val verifiedFullPages = java.util.Collections.synchronizedSet(mutableSetOf(1, 604))
+    private val verifiedFullPages = java.util.Collections.synchronizedSet(mutableSetOf<Int>())
 
     @Volatile
     private var availableReciterSurahs: Set<Int>? = null
@@ -41,7 +57,14 @@ class QuranAndHadithRepository(
                 QuranCatalog.surahs.map { s -> s.toCachedEntity(syncedAtMillis = 0L) }
             )
         }
-        if (quranDao.getSurahAyahsOnce(1).isEmpty() || quranDao.getPageAyahsOnce(604).size < 15) {
+        val fatihahLocal = quranDao.getSurahAyahsOnce(1)
+        val page604Local = quranDao.getPageAyahsOnce(604)
+        if (
+            fatihahLocal.size < 7 ||
+            fatihahLocal.any { it.arabicTextUthmani.isBlank() } ||
+            page604Local.size < 15 ||
+            page604Local.any { it.arabicTextUthmani.isBlank() }
+        ) {
             quranDao.upsertAyahs(QuranCatalog.offlineStarterAyahs)
         }
     }
@@ -94,23 +117,89 @@ class QuranAndHadithRepository(
     fun observeAllDownloads(): Flow<List<DownloadedAudioEntity>> =
         downloadedDao.observeAllDownloads()
 
-    suspend fun loadSurahFromNetworkIfNeeded(surahNumber: Int, forceRefresh: Boolean = false): Result<List<CachedSurahAyahEntity>> =
+    suspend fun getInstantSurahAyahs(surahNumber: Int): List<CachedSurahAyahEntity> =
         withContext(Dispatchers.IO) {
             val safeSurah = surahNumber.coerceIn(1, 114)
+            val expectedCount = QuranCatalog.surahs.getOrNull(safeSurah - 1)?.ayahCount ?: 0
             val local = quranDao.getSurahAyahsOnce(safeSurah)
                 .distinctBy { it.globalKey }
                 .sortedBy { it.ayahNumber }
+                .map { entity ->
+                    val cleaned = BundledQuranLoader.cleanUthmaniAyahText(
+                        entity.surahNumber,
+                        entity.ayahNumber,
+                        entity.arabicTextUthmani
+                    )
+                    if (cleaned == entity.arabicTextUthmani) entity else entity.copy(arabicTextUthmani = cleaned)
+                }
+            val localComplete = local.size >= expectedCount &&
+                local.isNotEmpty() &&
+                local.all { it.arabicTextUthmani.isNotBlank() }
+            if (localComplete) {
+                return@withContext local
+            }
+            val bundled = BundledQuranLoader.getSurahAyahs(context, safeSurah)
+            if (bundled.isEmpty()) return@withContext local.filter { it.arabicTextUthmani.isNotBlank() }
+            val merged = mergePreservingTextAndTafsir(
+                incoming = bundled,
+                existingByKey = local.associateBy { it.globalKey }
+            )
+            quranDao.upsertAyahs(merged)
+            merged
+        }
+
+    suspend fun loadSurahFromNetworkIfNeeded(surahNumber: Int, forceRefresh: Boolean = false): Result<List<CachedSurahAyahEntity>> =
+        withContext(Dispatchers.IO) {
+            val safeSurah = surahNumber.coerceIn(1, 114)
             val fallbackSurah = QuranCatalog.surahs.getOrNull(safeSurah - 1)
             val expectedCount = fallbackSurah?.ayahCount ?: 0
-            if (!forceRefresh && local.size >= expectedCount && local.isNotEmpty()) {
-                return@withContext Result.success(local)
+            val local = quranDao.getSurahAyahsOnce(safeSurah)
+                .distinctBy { it.globalKey }
+                .sortedBy { it.ayahNumber }
+                .map { entity ->
+                    val cleaned = BundledQuranLoader.cleanUthmaniAyahText(
+                        entity.surahNumber,
+                        entity.ayahNumber,
+                        entity.arabicTextUthmani
+                    )
+                    if (cleaned == entity.arabicTextUthmani) entity else entity.copy(arabicTextUthmani = cleaned)
+                }
+            val localComplete = local.size >= expectedCount &&
+                local.isNotEmpty() &&
+                local.all { it.arabicTextUthmani.isNotBlank() }
+            val bundled = BundledQuranLoader.getSurahAyahs(context, safeSurah)
+            val instantBaseline = if (localComplete) {
+                local
+            } else if (bundled.isNotEmpty()) {
+                val mergedBundled = mergePreservingTextAndTafsir(bundled, local.associateBy { it.globalKey })
+                quranDao.upsertAyahs(mergedBundled)
+                mergedBundled
+            } else {
+                local.filter { it.arabicTextUthmani.isNotBlank() }
             }
+
+            val hasAllEnrichment = instantBaseline.size >= expectedCount &&
+                instantBaseline.isNotEmpty() &&
+                instantBaseline.all { it.englishTranslation.isNotBlank() && it.arabicTafsir.isNotBlank() }
+
+            if (!forceRefresh && hasAllEnrichment) {
+                return@withContext Result.success(instantBaseline)
+            }
+            if (!isNetworkConnected()) {
+                return@withContext if (instantBaseline.isNotEmpty()) Result.success(instantBaseline)
+                else Result.failure(IllegalStateException("Offline"))
+            }
+
             try {
                 var entities: List<CachedSurahAyahEntity> = emptyList()
-                val response = try {
-                    NetworkModule.alQuranApi.getSurahWithTafsirAndTranslation(safeSurah)
-                } catch (_: Exception) {
-                    null
+                val response = withTimeoutOrNull(8_000L) {
+                    try {
+                        NetworkModule.alQuranApi.getSurahWithTafsirAndTranslation(safeSurah)
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (_: Exception) {
+                        null
+                    }
                 }
                 val editions = response?.data.orEmpty()
                 val uthmani = editions.getOrNull(0)?.ayahs.orEmpty()
@@ -120,7 +209,7 @@ class QuranAndHadithRepository(
                 if (uthmani.isNotEmpty()) {
                     entities = uthmani.mapIndexedNotNull { idx, ayah ->
                         val ayahNum = ayah.numberInSurah ?: 0
-                        val text = ayah.text?.trim().orEmpty()
+                        val text = BundledQuranLoader.cleanUthmaniAyahText(safeSurah, ayahNum, ayah.text.orEmpty())
                         if (ayahNum <= 0 || text.isBlank()) return@mapIndexedNotNull null
                         CachedSurahAyahEntity(
                             globalKey = "${safeSurah}_$ayahNum",
@@ -137,13 +226,15 @@ class QuranAndHadithRepository(
                     }
                 }
 
-                // Fallback to single Uthmani edition if multi-edition call failed or returned empty
-                if (entities.isEmpty()) {
-                    val singleResp = NetworkModule.alQuranApi.getSingleSurahUthmani(safeSurah)
-                    val singleAyahs = singleResp.data?.ayahs.orEmpty()
+                // Fallback to single Uthmani edition only if baseline is somehow empty
+                if (entities.isEmpty() && instantBaseline.isEmpty()) {
+                    val singleResp = withTimeoutOrNull(6_000L) {
+                        NetworkModule.alQuranApi.getSingleSurahUthmani(safeSurah)
+                    }
+                    val singleAyahs = singleResp?.data?.ayahs.orEmpty()
                     entities = singleAyahs.mapNotNull { ayah ->
                         val ayahNum = ayah.numberInSurah ?: 0
-                        val text = ayah.text?.trim().orEmpty()
+                        val text = BundledQuranLoader.cleanUthmaniAyahText(safeSurah, ayahNum, ayah.text.orEmpty())
                         if (ayahNum <= 0 || text.isBlank()) return@mapNotNull null
                         CachedSurahAyahEntity(
                             globalKey = "${safeSurah}_$ayahNum",
@@ -162,19 +253,29 @@ class QuranAndHadithRepository(
 
                 val deduped = entities.distinctBy { it.globalKey }.sortedBy { it.ayahNumber }
                 if (deduped.isNotEmpty()) {
-                    val merged = mergePreservingTextAndTafsir(
-                        incoming = deduped,
-                        existingByKey = local.associateBy { it.globalKey }
-                    )
-                    quranDao.upsertAyahs(merged)
-                    Result.success(merged)
-                } else if (local.isNotEmpty()) {
-                    Result.success(local)
+                    val baseList = if (instantBaseline.size > deduped.size) {
+                        val dedupedByKey = deduped.associateBy { it.globalKey }
+                        mergePreservingTextAndTafsir(
+                            incoming = instantBaseline,
+                            existingByKey = dedupedByKey
+                        )
+                    } else {
+                        mergePreservingTextAndTafsir(
+                            incoming = deduped,
+                            existingByKey = instantBaseline.associateBy { it.globalKey }
+                        )
+                    }
+                    quranDao.upsertAyahs(baseList)
+                    Result.success(baseList)
+                } else if (instantBaseline.isNotEmpty()) {
+                    Result.success(instantBaseline)
                 } else {
                     Result.failure(IllegalStateException("Empty Quran API response"))
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (e: Exception) {
-                if (local.isNotEmpty()) Result.success(local)
+                if (instantBaseline.isNotEmpty()) Result.success(instantBaseline)
                 else Result.failure(e)
             }
         }
@@ -185,17 +286,32 @@ class QuranAndHadithRepository(
             val local = quranDao.getPageAyahsOnce(safePage)
                 .distinctBy { it.globalKey }
                 .sortedBy { it.globalAyahNumber }
-            if (!forceRefresh && verifiedFullPages.contains(safePage) && local.isNotEmpty()) {
+            if (!forceRefresh && verifiedFullPages.contains(safePage) && local.isNotEmpty() && local.all { it.arabicTextUthmani.isNotBlank() }) {
                 return@withContext Result.success(local)
             }
+
+            val bundledPage = BundledQuranLoader.getPageAyahs(context, safePage)
+            if (!forceRefresh && bundledPage.isNotEmpty()) {
+                val existingByKey = quranDao.getAyahsByKeys(bundledPage.map { it.globalKey })
+                    .associateBy { it.globalKey }
+                val merged = mergePreservingTextAndTafsir(bundledPage, existingByKey)
+                quranDao.upsertAyahs(merged)
+                verifiedFullPages.add(safePage)
+                return@withContext Result.success(merged)
+            }
+
             try {
-                val resp = NetworkModule.alQuranApi.getMushafPage(safePage)
+                val resp = withTimeoutOrNull(8_000L) {
+                    NetworkModule.alQuranApi.getMushafPage(safePage)
+                } ?: return@withContext if (local.isNotEmpty()) Result.success(local)
+                else Result.failure(IllegalStateException("Timed out loading Mushaf page"))
+
                 val ayahs = resp.data?.ayahs.orEmpty()
                 val rawMapped = ayahs.mapNotNull { dto ->
                     val ayahNum = dto.numberInSurah ?: 0
-                    val text = dto.text?.trim().orEmpty()
-                    if (ayahNum <= 0 || text.isBlank()) return@mapNotNull null
                     val sNum = (dto.surah?.number ?: 1).coerceIn(1, 114)
+                    val text = BundledQuranLoader.cleanUthmaniAyahText(sNum, ayahNum, dto.text.orEmpty())
+                    if (ayahNum <= 0 || text.isBlank()) return@mapNotNull null
                     CachedSurahAyahEntity(
                         globalKey = "${sNum}_$ayahNum",
                         surahNumber = sNum,
@@ -222,6 +338,8 @@ class QuranAndHadithRepository(
                 } else {
                     Result.failure(IllegalStateException("Empty Mushaf page response"))
                 }
+            } catch (ce: CancellationException) {
+                throw ce
             } catch (e: Exception) {
                 if (local.isNotEmpty()) Result.success(local)
                 else Result.failure(e)
@@ -233,13 +351,15 @@ class QuranAndHadithRepository(
         if (trimmed.length < 2) return@withContext emptyList()
         val localMatches = quranDao.searchLocalAyahs(trimmed)
         if (localMatches.isNotEmpty()) return@withContext localMatches
+        val bundledMatches = BundledQuranLoader.searchAyahs(context, trimmed)
+        if (bundledMatches.isNotEmpty()) return@withContext bundledMatches
         try {
             val resp = NetworkModule.alQuranApi.searchQuran(trimmed)
             resp.data?.matches?.take(30)?.mapNotNull { m ->
                 val ayahNum = m.numberInSurah ?: 0
-                val text = m.text?.trim().orEmpty()
-                if (ayahNum <= 0 || text.isBlank()) return@mapNotNull null
                 val sNum = (m.surah?.number ?: 1).coerceIn(1, 114)
+                val text = BundledQuranLoader.cleanUthmaniAyahText(sNum, ayahNum, m.text.orEmpty())
+                if (ayahNum <= 0 || text.isBlank()) return@mapNotNull null
                 CachedSurahAyahEntity(
                     globalKey = "${sNum}_$ayahNum",
                     surahNumber = sNum,
@@ -379,6 +499,7 @@ class QuranAndHadithRepository(
 
     companion object {
         const val RECITER_SURAH_UNAVAILABLE_CODE = "RECITER_SURAH_UNAVAILABLE"
+        const val OFFLINE_AUDIO_CODE = "OFFLINE_AUDIO"
 
         private fun SurahInfo.toCachedEntity(syncedAtMillis: Long) = CachedSurahEntity(
             number = number,
@@ -477,6 +598,7 @@ class QuranAndHadithRepository(
                 val existing = existingByKey[entity.globalKey]
                 if (existing == null) entity
                 else entity.copy(
+                    arabicTextUthmani = entity.arabicTextUthmani.ifBlank { existing.arabicTextUthmani },
                     englishTranslation = entity.englishTranslation.ifBlank { existing.englishTranslation },
                     arabicTafsir = entity.arabicTafsir.ifBlank { existing.arabicTafsir }
                 )
@@ -508,44 +630,300 @@ class QuranAndHadithRepository(
             }
             return resultList
         }
+
+        fun buildIslamicNetworkAyahAudioUrl(edition: String, globalAyahNumber: Int): String {
+            val safeEdition = edition.trim().ifBlank { "ar.alafasy" }
+            val safeNum = globalAyahNumber.coerceIn(1, 6236)
+            return "https://cdn.islamic.network/quran/audio/128/$safeEdition/$safeNum.mp3"
+        }
+
+        fun selectPreferredArchiveMp3Url(meta: ArchiveMetadataResponse): String? {
+            val d1 = meta.d1?.trim().orEmpty()
+            val dir = meta.dir?.trim().orEmpty()
+            if (d1.isBlank() || dir.isBlank()) return null
+
+            val files = meta.files.orEmpty().filter { dto ->
+                val name = dto.name?.trim().orEmpty()
+                name.endsWith(".mp3", ignoreCase = true) &&
+                    !name.startsWith("._") &&
+                    !name.contains("__MACOSX", ignoreCase = true)
+            }
+            if (files.isEmpty()) return null
+
+            val chosen = files.firstOrNull { dto ->
+                dto.format.orEmpty().contains("MP3", ignoreCase = true) &&
+                    !dto.name.orEmpty().contains("64kb", ignoreCase = true)
+            } ?: files.firstOrNull { dto ->
+                dto.format.orEmpty().contains("MP3", ignoreCase = true)
+            } ?: files.first()
+
+            val fileName = chosen.name?.trim().orEmpty()
+            if (fileName.isBlank()) return null
+            val encodedName = fileName.split("/")
+                .joinToString("/") { segment ->
+                    URLEncoder.encode(segment, "UTF-8").replace("+", "%20")
+                }
+            val cleanDir = if (dir.startsWith("/")) dir else "/$dir"
+            return normalizeHttpsUrl("https://$d1$cleanDir/$encodedName")
+        }
     }
 
-    suspend fun getRuqyahPlaybackSource(track: RuqyahAudioTrack): Result<String> = withContext(Dispatchers.IO) {
+    private fun isNetworkConnected(): Boolean {
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return true
+            val net = cm.activeNetwork ?: return false
+            val caps = cm.getNetworkCapabilities(net) ?: return false
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        } catch (_: Exception) {
+            true
+        }
+    }
+
+    suspend fun getRuqyahPlaybackSource(
+        track: RuqyahAudioTrack,
+        reciterEdition: String = "ar.alafasy"
+    ): Result<String> = withContext(Dispatchers.IO) {
         val local = downloadedDao.getDownloadByKey(track.id)
         if (local != null && File(local.localFilePath).exists()) {
             return@withContext Result.success(local.localFilePath)
         }
-        resolveArchiveMp3Url(track.archiveItemId)
+        when (val src = track.audioSource) {
+            is RuqyahAudioSource.ArchiveItem -> resolveArchiveMp3Url(src.identifier)
+            is RuqyahAudioSource.SyncedQuranSequence -> {
+                val firstAyah = src.ayahRefs.firstOrNull { it.isQuranAyah }
+                    ?: return@withContext Result.failure(IllegalStateException("No Quranic ayahs configured"))
+                if (!isNetworkConnected()) {
+                    return@withContext Result.failure(IllegalStateException(OFFLINE_AUDIO_CODE))
+                }
+                Result.success(buildIslamicNetworkAyahAudioUrl(reciterEdition, firstAyah.globalAyahNumber))
+            }
+            is RuqyahAudioSource.FullSurahMp3Quran -> {
+                resolveMp3QuranSurahAudioUrl(src.surahNumber, reciterEdition).map { it.first }
+            }
+        }
     }
 
-    suspend fun downloadRuqyahAudio(track: RuqyahAudioTrack): Result<DownloadedAudioEntity> = withContext(Dispatchers.IO) {
-        val urlRes = resolveArchiveMp3Url(track.archiveItemId)
-        val url = urlRes.getOrElse { return@withContext Result.failure(it) }
-        val destFile = File(File(context.filesDir, "ruqyah_audio"), "${track.id}.mp3")
-        val downloadRes = NetworkModule.downloadAudioFile(url, destFile)
-        downloadRes.map { bytes ->
-            val entity = DownloadedAudioEntity(
-                audioKey = track.id,
-                title = track.titleAr,
-                localFilePath = destFile.absolutePath,
-                sizeBytes = bytes,
-                downloadedAtMillis = System.currentTimeMillis()
+    suspend fun resolveRuqyahPlaybackPlan(
+        track: RuqyahAudioTrack,
+        reciterEdition: String,
+        isAr: Boolean
+    ): Result<RuqyahQueuePlan> = withContext(Dispatchers.IO) {
+        val profile = RuqyahCatalog.findReciterByEdition(reciterEdition)
+        when (val src = track.audioSource) {
+            is RuqyahAudioSource.ArchiveItem -> {
+                val local = downloadedDao.getDownloadByKey(track.id)
+                val resolvedUrl = if (local != null && File(local.localFilePath).exists()) {
+                    local.localFilePath
+                } else {
+                    if (!isNetworkConnected()) {
+                        return@withContext Result.failure(IllegalStateException(OFFLINE_AUDIO_CODE))
+                    }
+                    resolveArchiveMp3Url(src.identifier).getOrElse {
+                        return@withContext Result.failure(it)
+                    }
+                }
+                val trackObj = QueueTrack(
+                    trackId = track.id,
+                    source = resolvedUrl,
+                    title = if (isAr) track.titleAr else track.titleEn,
+                    subtitle = if (isAr) track.reciterAr else track.reciterEn
+                )
+                Result.success(
+                    RuqyahQueuePlan(
+                        tracks = listOf(trackObj),
+                        resolvedReciterNameAr = track.reciterAr,
+                        resolvedReciterNameEn = track.reciterEn,
+                        loopWholeQueue = false
+                    )
+                )
+            }
+
+            is RuqyahAudioSource.SyncedQuranSequence -> {
+                val quranRefs = src.ayahRefs.filter { it.isQuranAyah }
+                if (quranRefs.isEmpty()) {
+                    return@withContext Result.failure(IllegalStateException("Empty Quran Ruqyah sequence"))
+                }
+                val edition = profile.cdnEdition ?: "ar.alafasy"
+                val offlineDir = File(File(context.filesDir, "ruqyah_audio"), "${track.id}_$edition")
+                val hasAllOffline = quranRefs.all { ref ->
+                    File(offlineDir, "${ref.globalAyahNumber}.mp3").exists()
+                }
+                if (!hasAllOffline && !isNetworkConnected()) {
+                    return@withContext Result.failure(IllegalStateException(OFFLINE_AUDIO_CODE))
+                }
+                val queue = quranRefs.mapIndexed { idx, ref ->
+                    val localFile = File(offlineDir, "${ref.globalAyahNumber}.mp3")
+                    val audioUri = if (localFile.exists()) {
+                        localFile.absolutePath
+                    } else {
+                        buildIslamicNetworkAyahAudioUrl(edition, ref.globalAyahNumber)
+                    }
+                    val sInfo = QuranCatalog.surahs.getOrNull(ref.surahNumber - 1)
+                    val ayahBadge = if (isAr) {
+                        "سورة ${sInfo?.arabicName ?: ref.surahNumber} • الآية ${ref.ayahNumber}"
+                    } else {
+                        "${sInfo?.englishName ?: "Surah ${ref.surahNumber}"} • Ayah ${ref.ayahNumber}"
+                    }
+                    QueueTrack(
+                        trackId = "${track.id}_${edition}_${idx}_${ref.globalAyahNumber}",
+                        source = audioUri,
+                        title = if (isAr) "${track.titleAr} • $ayahBadge" else "${track.titleEn} • $ayahBadge",
+                        subtitle = if (isAr) profile.nameAr else profile.nameEn,
+                        surahNumber = ref.surahNumber,
+                        ayahNumber = ref.ayahNumber
+                    )
+                }
+                Result.success(
+                    RuqyahQueuePlan(
+                        tracks = queue,
+                        resolvedReciterNameAr = profile.nameAr,
+                        resolvedReciterNameEn = profile.nameEn,
+                        loopWholeQueue = true
+                    )
+                )
+            }
+
+            is RuqyahAudioSource.FullSurahMp3Quran -> {
+                val localFile = File(File(context.filesDir, "ruqyah_audio"), "${track.id}_${profile.id}.mp3")
+                val legacyLocal = downloadedDao.getDownloadByKey(track.id)
+                val resolvedPair: Pair<String, String> = when {
+                    localFile.exists() -> localFile.absolutePath to (if (isAr) profile.nameAr else profile.nameEn)
+                    legacyLocal != null && File(legacyLocal.localFilePath).exists() -> {
+                        legacyLocal.localFilePath to (if (isAr) profile.nameAr else profile.nameEn)
+                    }
+                    else -> {
+                        if (!isNetworkConnected()) {
+                            return@withContext Result.failure(IllegalStateException(OFFLINE_AUDIO_CODE))
+                        }
+                        resolveMp3QuranSurahAudioUrl(src.surahNumber, reciterEdition).getOrElse {
+                            return@withContext Result.failure(it)
+                        }
+                    }
+                }
+                val qTrack = QueueTrack(
+                    trackId = "${track.id}_${profile.id}",
+                    source = resolvedPair.first,
+                    title = if (isAr) track.titleAr else track.titleEn,
+                    subtitle = resolvedPair.second,
+                    surahNumber = src.surahNumber
+                )
+                Result.success(
+                    RuqyahQueuePlan(
+                        tracks = listOf(qTrack),
+                        resolvedReciterNameAr = resolvedPair.second,
+                        resolvedReciterNameEn = profile.nameEn,
+                        loopWholeQueue = false
+                    )
+                )
+            }
+        }
+    }
+
+    suspend fun downloadRuqyahAudio(
+        track: RuqyahAudioTrack,
+        reciterEdition: String = "ar.alafasy"
+    ): Result<DownloadedAudioEntity> = withContext(Dispatchers.IO) {
+        val profile = RuqyahCatalog.findReciterByEdition(reciterEdition)
+        when (val src = track.audioSource) {
+            is RuqyahAudioSource.ArchiveItem -> {
+                val urlRes = resolveArchiveMp3Url(src.identifier)
+                val url = urlRes.getOrElse { return@withContext Result.failure(it) }
+                val destFile = File(File(context.filesDir, "ruqyah_audio"), "${track.id}.mp3")
+                val downloadRes = NetworkModule.downloadAudioFile(url, destFile)
+                downloadRes.map { bytes ->
+                    val entity = DownloadedAudioEntity(
+                        audioKey = track.id,
+                        title = track.titleAr,
+                        localFilePath = destFile.absolutePath,
+                        sizeBytes = bytes,
+                        downloadedAtMillis = System.currentTimeMillis()
+                    )
+                    downloadedDao.upsertDownload(entity)
+                    entity
+                }
+            }
+
+            is RuqyahAudioSource.FullSurahMp3Quran -> {
+                val urlRes = resolveMp3QuranSurahAudioUrl(src.surahNumber, reciterEdition)
+                val url = urlRes.getOrElse { return@withContext Result.failure(it) }.first
+                val destFile = File(File(context.filesDir, "ruqyah_audio"), "${track.id}_${profile.id}.mp3")
+                val downloadRes = NetworkModule.downloadAudioFile(url, destFile)
+                downloadRes.map { bytes ->
+                    val entity = DownloadedAudioEntity(
+                        audioKey = track.id,
+                        title = track.titleAr,
+                        localFilePath = destFile.absolutePath,
+                        sizeBytes = bytes,
+                        downloadedAtMillis = System.currentTimeMillis()
+                    )
+                    downloadedDao.upsertDownload(entity)
+                    entity
+                }
+            }
+
+            is RuqyahAudioSource.SyncedQuranSequence -> {
+                val quranRefs = src.ayahRefs.filter { it.isQuranAyah }
+                if (quranRefs.isEmpty()) {
+                    return@withContext Result.failure(IllegalStateException("No audio verses in suite"))
+                }
+                val edition = profile.cdnEdition ?: "ar.alafasy"
+                val offlineDir = File(File(context.filesDir, "ruqyah_audio"), "${track.id}_$edition")
+                offlineDir.mkdirs()
+                var totalBytes = 0L
+                for (ref in quranRefs) {
+                    val destFile = File(offlineDir, "${ref.globalAyahNumber}.mp3")
+                    if (!destFile.exists() || destFile.length() == 0L) {
+                        val url = buildIslamicNetworkAyahAudioUrl(edition, ref.globalAyahNumber)
+                        val bytes = NetworkModule.downloadAudioFile(url, destFile)
+                            .getOrElse { return@withContext Result.failure(it) }
+                        totalBytes += bytes
+                    } else {
+                        totalBytes += destFile.length()
+                    }
+                }
+                val entity = DownloadedAudioEntity(
+                    audioKey = track.id,
+                    title = track.titleAr,
+                    localFilePath = offlineDir.absolutePath,
+                    sizeBytes = totalBytes,
+                    downloadedAtMillis = System.currentTimeMillis()
+                )
+                downloadedDao.upsertDownload(entity)
+                Result.success(entity)
+            }
+        }
+    }
+
+    private suspend fun resolveMp3QuranSurahAudioUrl(
+        surahNumber: Int,
+        reciterEdition: String
+    ): Result<Pair<String, String>> {
+        return try {
+            val profile = RuqyahCatalog.findReciterByEdition(reciterEdition)
+            val resp = NetworkModule.mp3QuranApi.getReciters("ar")
+            val match = RuqyahCatalog.findBestMoshafForReciter(
+                reciters = resp.reciters.orEmpty(),
+                profile = profile,
+                targetSurah = surahNumber
             )
-            downloadedDao.upsertDownload(entity)
-            entity
+            if (match != null) {
+                val padded = surahNumber.coerceIn(1, 114).toString().padStart(3, '0')
+                Result.success("${normalizeHttpsUrl(match.first)}/$padded.mp3" to match.second)
+            } else {
+                Result.failure(IllegalStateException("MP3Quran reciter server unavailable"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 
     private suspend fun resolveArchiveMp3Url(identifier: String): Result<String> {
         return try {
             val meta = NetworkModule.archiveOrgApi.getItemMetadata(identifier)
-            val mp3File = meta.files.firstOrNull {
-                it.name.endsWith(".mp3", ignoreCase = true) && it.format.contains("MP3", ignoreCase = true)
-            } ?: meta.files.firstOrNull { it.name.endsWith(".mp3", ignoreCase = true) }
-
-            if (mp3File != null && meta.d1.isNotBlank() && meta.dir.isNotBlank()) {
-                val encodedName = URLEncoder.encode(mp3File.name, "UTF-8").replace("+", "%20")
-                Result.success("https://${meta.d1}${meta.dir}/$encodedName")
+            val url = selectPreferredArchiveMp3Url(meta)
+            if (url != null) {
+                Result.success(url)
             } else {
                 Result.failure(IllegalStateException("MP3 entry not found in Archive metadata"))
             }

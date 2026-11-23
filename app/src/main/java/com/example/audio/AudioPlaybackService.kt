@@ -62,6 +62,10 @@ data class AudioPlaybackState(
     val ayahRepeatDone: Int = 0,
     val queueIndex: Int = 0,
     val queueSize: Int = 0,
+    val volume: Float = 1.0f,
+    val sleepTimerRemainingMs: Long = 0L,
+    val sleepTimerMinutes: Int = 0,
+    val loopWholeQueueOnRepeatSurah: Boolean = false,
     val errorMessage: String? = null
 )
 
@@ -82,6 +86,11 @@ object AudioPlayerController {
         if (ayahRepeatTarget <= 0) return true // Unlimited when 0
         return (ayahRepeatDoneSoFar + 1) < ayahRepeatTarget
     }
+
+    fun computeSeekTarget(currentMs: Long, deltaMs: Long, durationMs: Long): Long {
+        val raw = currentMs + deltaMs
+        return if (durationMs > 0L) raw.coerceIn(0L, durationMs) else raw.coerceAtLeast(0L)
+    }
 }
 
 class AudioPlaybackService : Service() {
@@ -90,12 +99,14 @@ class AudioPlaybackService : Service() {
     private var mediaPlayer: MediaPlayer? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var tickerJob: Job? = null
+    private var sleepTimerJob: Job? = null
     private var playbackQueue: List<QueueTrack> = emptyList()
     private var currentQueueIndex: Int = 0
     private var playbackGeneration: Long = 0L
     private var lastCompletedGeneration: Long = -1L
+    private var currentVolume: Float = 1.0f
 
-    private lateinit var audioManager: AudioManager
+    private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
     private var resumeOnFocusGain: Boolean = false
 
@@ -113,14 +124,15 @@ class AudioPlaybackService : Service() {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
                 synchronized(playerLock) {
                     try {
-                        mediaPlayer?.setVolume(0.25f, 0.25f)
+                        val ducked = (currentVolume * 0.25f).coerceIn(0f, 1f)
+                        mediaPlayer?.setVolume(ducked, ducked)
                     } catch (_: Exception) {}
                 }
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 synchronized(playerLock) {
                     try {
-                        mediaPlayer?.setVolume(1.0f, 1.0f)
+                        mediaPlayer?.setVolume(currentVolume, currentVolume)
                     } catch (_: Exception) {}
                 }
                 if (resumeOnFocusGain) {
@@ -135,7 +147,7 @@ class AudioPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
         ensureChannel()
     }
 
@@ -144,7 +156,7 @@ class AudioPlaybackService : Service() {
             ACTION_PLAY -> {
                 val source = intent.getStringExtra(EXTRA_SOURCE) ?: return START_NOT_STICKY
                 val trackId = intent.getStringExtra(EXTRA_TRACK_ID) ?: source
-                val title = intent.getStringExtra(EXTRA_TITLE) ?: "SOUFIAN ISLAM"
+                val title = intent.getStringExtra(EXTRA_TITLE) ?: "AL HIDAYA – الهداية"
                 val subtitle = intent.getStringExtra(EXTRA_SUBTITLE) ?: ""
                 val surahNum = intent.getIntExtra(EXTRA_SURAH_NUMBER, 0)
                 val ayahNum = intent.getIntExtra(EXTRA_AYAH_NUMBER, 0)
@@ -171,7 +183,8 @@ class AudioPlaybackService : Service() {
                     prev.copy(
                         repeatMode = targetMode,
                         ayahRepeatTarget = if (requestedRepeatCount >= 0) requestedRepeatCount else prev.ayahRepeatTarget,
-                        ayahRepeatDone = 0
+                        ayahRepeatDone = 0,
+                        loopWholeQueueOnRepeatSurah = false
                     )
                 }
                 startPlaybackAtIndex(0)
@@ -184,6 +197,7 @@ class AudioPlaybackService : Service() {
                 val subtitles = intent.getStringArrayListExtra(EXTRA_QUEUE_SUBTITLES).orEmpty()
                 val surahNums = intent.getIntegerArrayListExtra(EXTRA_QUEUE_SURAHS).orEmpty()
                 val ayahNums = intent.getIntegerArrayListExtra(EXTRA_QUEUE_AYAHS).orEmpty()
+                val loopWholeQueue = intent.getBooleanExtra(EXTRA_LOOP_WHOLE_QUEUE, false)
                 if (sources.isEmpty()) return START_NOT_STICKY
 
                 // Deduplicate strictly by unique trackId so no Surah or Ayah is ever queued twice
@@ -191,7 +205,7 @@ class AudioPlaybackService : Service() {
                     QueueTrack(
                         trackId = trackIds.getOrNull(idx) ?: "track_${idx}_$src",
                         source = src,
-                        title = titles.getOrNull(idx) ?: "SOUFIAN ISLAM",
+                        title = titles.getOrNull(idx) ?: "AL HIDAYA – الهداية",
                         subtitle = subtitles.getOrNull(idx) ?: "",
                         surahNumber = surahNums.getOrNull(idx) ?: 0,
                         ayahNumber = ayahNums.getOrNull(idx) ?: 0
@@ -206,7 +220,8 @@ class AudioPlaybackService : Service() {
                 AudioPlayerController.updateState {
                     it.copy(
                         repeatMode = RepeatMode.CONTINUOUS,
-                        ayahRepeatDone = 0
+                        ayahRepeatDone = 0,
+                        loopWholeQueueOnRepeatSurah = loopWholeQueue
                     )
                 }
                 startPlaybackAtIndex(startIdx)
@@ -280,12 +295,28 @@ class AudioPlaybackService : Service() {
 
             ACTION_SEEK -> {
                 val pos = intent.getLongExtra(EXTRA_SEEK_MS, 0L)
-                synchronized(playerLock) {
-                    try {
-                        mediaPlayer?.seekTo(pos.toInt())
-                    } catch (_: Exception) {}
-                }
-                AudioPlayerController.updateState { it.copy(positionMs = pos) }
+                seekToInternal(pos)
+            }
+
+            ACTION_SEEK_BY -> {
+                val delta = intent.getLongExtra(EXTRA_SEEK_DELTA_MS, 0L)
+                val snapshot = AudioPlayerController.state.value
+                val target = AudioPlayerController.computeSeekTarget(
+                    currentMs = snapshot.positionMs,
+                    deltaMs = delta,
+                    durationMs = snapshot.durationMs
+                )
+                seekToInternal(target)
+            }
+
+            ACTION_SET_VOLUME -> {
+                val volume = intent.getFloatExtra(EXTRA_VOLUME, 1.0f).coerceIn(0f, 1f)
+                setVolumeInternal(volume)
+            }
+
+            ACTION_SET_SLEEP_TIMER -> {
+                val minutes = intent.getIntExtra(EXTRA_SLEEP_TIMER_MINUTES, 0).coerceAtLeast(0)
+                startSleepTimer(minutes)
             }
         }
         return START_NOT_STICKY
@@ -296,7 +327,19 @@ class AudioPlaybackService : Service() {
         currentQueueIndex = index
 
         val notification = buildNotification(track.title, track.subtitle, isPlaying = true)
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            AudioPlayerController.updateState {
+                it.copy(
+                    isPlaying = false,
+                    isBuffering = false,
+                    errorMessage = e.localizedMessage ?: "Foreground playback not allowed"
+                )
+            }
+            stopSelf()
+            return
+        }
 
         if (!requestAudioFocus()) {
             AudioPlayerController.updateState {
@@ -350,24 +393,40 @@ class AudioPlaybackService : Service() {
                         if (myGeneration != playbackGeneration || player !== mediaPlayer) return@setOnPreparedListener
                     }
                     val snapshot = AudioPlayerController.state.value
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && snapshot.speed != 1.0f) {
+                    if (snapshot.speed != 1.0f) {
                         try {
                             player.playbackParams = PlaybackParams().setSpeed(snapshot.speed)
                         } catch (_: Exception) {}
                     }
                     // Always manage repeat transitions explicitly in OnCompletionListener (never native looping)
-                    player.isLooping = false
-                    player.start()
-                    AudioPlayerController.updateState {
-                        it.copy(
-                            isPlaying = true,
-                            isBuffering = false,
-                            isCompleted = false,
-                            durationMs = player.duration.toLong().coerceAtLeast(0L)
-                        )
+                    try {
+                        player.isLooping = false
+                        player.setVolume(currentVolume, currentVolume)
+                        player.start()
+                        val durMs = try {
+                            player.duration.toLong().coerceAtLeast(0L)
+                        } catch (_: Exception) {
+                            0L
+                        }
+                        AudioPlayerController.updateState {
+                            it.copy(
+                                isPlaying = true,
+                                isBuffering = false,
+                                isCompleted = false,
+                                durationMs = durMs
+                            )
+                        }
+                        updateNotification(track.title, track.subtitle, true)
+                        startTicker()
+                    } catch (e: Exception) {
+                        AudioPlayerController.updateState {
+                            it.copy(
+                                isPlaying = false,
+                                isBuffering = false,
+                                errorMessage = e.localizedMessage
+                            )
+                        }
                     }
-                    updateNotification(track.title, track.subtitle, true)
-                    startTicker()
                 }
                 setOnCompletionListener { player ->
                     synchronized(playerLock) {
@@ -379,13 +438,22 @@ class AudioPlaybackService : Service() {
                     val currentState = AudioPlayerController.state.value
                     when (currentState.repeatMode) {
                         RepeatMode.REPEAT_SURAH -> {
-                            // Explicitly requested by user: repeat current Surah/track only
-                            synchronized(playerLock) {
-                                lastCompletedGeneration = -1L
+                            if (currentState.loopWholeQueueOnRepeatSurah && playbackQueue.size > 1) {
+                                val nextIdx = if (currentQueueIndex + 1 < playbackQueue.size) currentQueueIndex + 1 else 0
+                                startPlaybackAtIndex(nextIdx)
+                            } else {
+                                // Explicitly requested by user: repeat current Surah/track only
+                                synchronized(playerLock) {
+                                    lastCompletedGeneration = -1L
+                                }
+                                try {
+                                    player.seekTo(0)
+                                    player.start()
+                                    AudioPlayerController.updateState { it.copy(positionMs = 0L, isPlaying = true) }
+                                } catch (_: Exception) {
+                                    markPlaybackCompleted(track.title, track.subtitle, currentState.ayahRepeatDone)
+                                }
                             }
-                            player.seekTo(0)
-                            player.start()
-                            AudioPlayerController.updateState { it.copy(positionMs = 0L, isPlaying = true) }
                         }
                         RepeatMode.REPEAT_AYAH -> {
                             if (AudioPlayerController.shouldReplayAyahOnCompletion(
@@ -397,11 +465,15 @@ class AudioPlaybackService : Service() {
                                 synchronized(playerLock) {
                                     lastCompletedGeneration = -1L
                                 }
-                                AudioPlayerController.updateState {
-                                    it.copy(ayahRepeatDone = it.ayahRepeatDone + 1, positionMs = 0L, isPlaying = true)
+                                try {
+                                    AudioPlayerController.updateState {
+                                        it.copy(ayahRepeatDone = it.ayahRepeatDone + 1, positionMs = 0L, isPlaying = true)
+                                    }
+                                    player.seekTo(0)
+                                    player.start()
+                                } catch (_: Exception) {
+                                    markPlaybackCompleted(track.title, track.subtitle, currentState.ayahRepeatDone + 1)
                                 }
-                                player.seekTo(0)
-                                player.start()
                             } else if (currentQueueIndex + 1 < playbackQueue.size) {
                                 startPlaybackAtIndex(currentQueueIndex + 1)
                             } else {
@@ -510,7 +582,7 @@ class AudioPlaybackService : Service() {
         AudioPlayerController.updateState { it.copy(speed = speed) }
         synchronized(playerLock) {
             val mp = mediaPlayer ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !AudioPlayerController.state.value.isBuffering) {
+            if (!AudioPlayerController.state.value.isBuffering) {
                 try {
                     val wasPlaying = mp.isPlaying
                     mp.playbackParams = PlaybackParams().setSpeed(speed)
@@ -545,6 +617,8 @@ class AudioPlaybackService : Service() {
     }
 
     private fun stopPlayback() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
         stopTicker()
         synchronized(playerLock) {
             releasePlayerLocked()
@@ -552,9 +626,61 @@ class AudioPlaybackService : Service() {
         abandonAudioFocus()
         playbackQueue = emptyList()
         currentQueueIndex = 0
-        AudioPlayerController.updateState { AudioPlaybackState() }
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        AudioPlayerController.updateState { AudioPlaybackState(volume = currentVolume) }
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
         stopSelf()
+    }
+
+    private fun seekToInternal(posMs: Long) {
+        val clamped = synchronized(playerLock) {
+            val mp = mediaPlayer
+            val maxDur = try {
+                mp?.duration?.toLong()?.takeIf { it > 0L }
+            } catch (_: Exception) {
+                null
+            }
+            val safePos = if (maxDur != null) posMs.coerceIn(0L, maxDur) else posMs.coerceAtLeast(0L)
+            try {
+                mp?.seekTo(safePos.toInt())
+            } catch (_: Exception) {}
+            safePos
+        }
+        AudioPlayerController.updateState { it.copy(positionMs = clamped) }
+    }
+
+    private fun setVolumeInternal(volume: Float) {
+        currentVolume = volume.coerceIn(0f, 1f)
+        synchronized(playerLock) {
+            try {
+                mediaPlayer?.setVolume(currentVolume, currentVolume)
+            } catch (_: Exception) {}
+        }
+        AudioPlayerController.updateState { it.copy(volume = currentVolume) }
+    }
+
+    private fun startSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        if (minutes <= 0) {
+            AudioPlayerController.updateState {
+                it.copy(sleepTimerMinutes = 0, sleepTimerRemainingMs = 0L)
+            }
+            return
+        }
+        val totalMs = minutes * 60_000L
+        AudioPlayerController.updateState {
+            it.copy(sleepTimerMinutes = minutes, sleepTimerRemainingMs = totalMs)
+        }
+        sleepTimerJob = serviceScope.launch {
+            var remaining = totalMs
+            while (remaining > 0L) {
+                delay(1000L)
+                remaining = (remaining - 1000L).coerceAtLeast(0L)
+                AudioPlayerController.updateState { it.copy(sleepTimerRemainingMs = remaining) }
+            }
+            AudioPlayerController.updateState { it.copy(sleepTimerMinutes = 0, sleepTimerRemainingMs = 0L) }
+            pauseInternal()
+        }
     }
 
     private fun startTicker() {
@@ -563,9 +689,13 @@ class AudioPlaybackService : Service() {
             while (true) {
                 val (pos, dur, playing) = synchronized(playerLock) {
                     val mp = mediaPlayer
-                    if (mp != null && mp.isPlaying) {
-                        Triple(mp.currentPosition.toLong(), mp.duration.toLong().coerceAtLeast(0L), true)
-                    } else {
+                    try {
+                        if (mp != null && mp.isPlaying) {
+                            Triple(mp.currentPosition.toLong().coerceAtLeast(0L), mp.duration.toLong().coerceAtLeast(0L), true)
+                        } else {
+                            Triple(0L, 0L, false)
+                        }
+                    } catch (_: Exception) {
                         Triple(0L, 0L, false)
                     }
                 }
@@ -603,39 +733,48 @@ class AudioPlaybackService : Service() {
     }
 
     private fun requestAudioFocus(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setOnAudioFocusChangeListener(focusChangeListener)
-                .build()
-            audioFocusRequest = req
-            audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                focusChangeListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN
-            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        val am = audioManager ?: return false
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setOnAudioFocusChangeListener(focusChangeListener)
+                    .build()
+                audioFocusRequest = req
+                am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            } else {
+                @Suppress("DEPRECATION")
+                am.requestAudioFocus(
+                    focusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            }
+        } catch (_: Exception) {
+            false
         }
     }
 
     private fun abandonAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-            audioFocusRequest = null
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(focusChangeListener)
-        }
+        val am = audioManager ?: return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+                audioFocusRequest = null
+            } else {
+                @Suppress("DEPRECATION")
+                am.abandonAudioFocus(focusChangeListener)
+            }
+        } catch (_: Exception) {}
     }
 
     override fun onDestroy() {
+        sleepTimerJob?.cancel()
         stopTicker()
         synchronized(playerLock) {
             releasePlayerLocked()
@@ -647,19 +786,22 @@ class AudioPlaybackService : Service() {
 
     private fun ensureChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "Quran, Ruqyah & Adhan Audio • الصوتيات",
+                "AL HIDAYA – الهداية • الصوتيات",
                 NotificationManager.IMPORTANCE_LOW
             )
-            nm.createNotificationChannel(channel)
+            runCatching { nm.createNotificationChannel(channel) }
         }
     }
 
     private fun updateNotification(title: String, subtitle: String, isPlaying: Boolean) {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIFICATION_ID, buildNotification(title, subtitle, isPlaying))
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+        try {
+            nm.notify(NOTIFICATION_ID, buildNotification(title, subtitle, isPlaying))
+        } catch (_: SecurityException) {
+        } catch (_: Exception) {}
     }
 
     private fun buildNotification(title: String, subtitle: String, isPlaying: Boolean): Notification {
@@ -690,6 +832,7 @@ class AudioPlaybackService : Service() {
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_mosque_notif)
+            .setSubText("AL HIDAYA – الهداية")
             .setContentTitle(title)
             .setContentText(subtitle)
             .setContentIntent(openIntent)
@@ -723,6 +866,9 @@ class AudioPlaybackService : Service() {
         const val ACTION_CYCLE_REPEAT = "com.example.audio.CYCLE_REPEAT"
         const val ACTION_SET_REPEAT_CONFIG = "com.example.audio.SET_REPEAT_CONFIG"
         const val ACTION_SEEK = "com.example.audio.SEEK"
+        const val ACTION_SEEK_BY = "com.example.audio.SEEK_BY"
+        const val ACTION_SET_VOLUME = "com.example.audio.SET_VOLUME"
+        const val ACTION_SET_SLEEP_TIMER = "com.example.audio.SET_SLEEP_TIMER"
 
         const val EXTRA_TRACK_ID = "extra_track_id"
         const val EXTRA_SOURCE = "extra_source"
@@ -737,10 +883,32 @@ class AudioPlaybackService : Service() {
         const val EXTRA_QUEUE_SURAHS = "extra_queue_surahs"
         const val EXTRA_QUEUE_AYAHS = "extra_queue_ayahs"
         const val EXTRA_QUEUE_START_INDEX = "extra_queue_start_index"
+        const val EXTRA_LOOP_WHOLE_QUEUE = "extra_loop_whole_queue"
         const val EXTRA_SPEED = "extra_speed"
         const val EXTRA_REPEAT_MODE = "extra_repeat_mode"
         const val EXTRA_AYAH_REPEAT_COUNT = "extra_ayah_repeat_count"
         const val EXTRA_SEEK_MS = "extra_seek_ms"
+        const val EXTRA_SEEK_DELTA_MS = "extra_seek_delta_ms"
+        const val EXTRA_VOLUME = "extra_volume"
+        const val EXTRA_SLEEP_TIMER_MINUTES = "extra_sleep_timer_minutes"
+
+        private fun startServiceSafely(context: Context, intent: Intent, foreground: Boolean) {
+            try {
+                if (foreground && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                AudioPlayerController.updateState {
+                    it.copy(
+                        isPlaying = false,
+                        isBuffering = false,
+                        errorMessage = e.localizedMessage ?: "Audio service unavailable"
+                    )
+                }
+            }
+        }
 
         fun startPlay(
             context: Context,
@@ -766,14 +934,15 @@ class AudioPlaybackService : Service() {
                     putExtra(EXTRA_AYAH_REPEAT_COUNT, ayahRepeatCount)
                 }
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            startServiceSafely(context, intent, foreground = true)
         }
 
-        fun startQueue(context: Context, tracks: List<QueueTrack>, startIndex: Int = 0) {
+        fun startQueue(
+            context: Context,
+            tracks: List<QueueTrack>,
+            startIndex: Int = 0,
+            loopWholeQueueOnRepeatSurah: Boolean = false
+        ) {
             if (tracks.isEmpty()) return
             val uniqueTracks = tracks.distinctBy { it.trackId }
             val intent = Intent(context, AudioPlaybackService::class.java).apply {
@@ -785,87 +954,150 @@ class AudioPlaybackService : Service() {
                 putIntegerArrayListExtra(EXTRA_QUEUE_SURAHS, ArrayList(uniqueTracks.map { it.surahNumber }))
                 putIntegerArrayListExtra(EXTRA_QUEUE_AYAHS, ArrayList(uniqueTracks.map { it.ayahNumber }))
                 putExtra(EXTRA_QUEUE_START_INDEX, startIndex.coerceIn(0, uniqueTracks.lastIndex))
+                putExtra(EXTRA_LOOP_WHOLE_QUEUE, loopWholeQueueOnRepeatSurah)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            startServiceSafely(context, intent, foreground = true)
         }
 
         fun replay(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_REPLAY
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_REPLAY },
+                foreground = true
+            )
         }
 
         fun next(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_NEXT
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_NEXT },
+                foreground = false
+            )
         }
 
         fun prev(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_PREV
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_PREV },
+                foreground = false
+            )
         }
 
         fun jumpToIndex(context: Context, index: Int) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_JUMP_TO_INDEX
-                putExtra(EXTRA_QUEUE_START_INDEX, index)
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_JUMP_TO_INDEX
+                    putExtra(EXTRA_QUEUE_START_INDEX, index)
+                },
+                foreground = false
+            )
         }
 
         fun togglePause(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_TOGGLE_PAUSE
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_TOGGLE_PAUSE },
+                foreground = false
+            )
         }
 
         fun pauseIfPlaying(context: Context) {
             if (AudioPlayerController.state.value.isPlaying) {
-                context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                    action = ACTION_PAUSE_ONLY
-                })
+                startServiceSafely(
+                    context,
+                    Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_PAUSE_ONLY },
+                    foreground = false
+                )
             }
         }
 
         fun stop(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_STOP
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_STOP },
+                foreground = false
+            )
         }
 
         fun setSpeed(context: Context, speed: Float) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_SET_SPEED
-                putExtra(EXTRA_SPEED, speed)
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SET_SPEED
+                    putExtra(EXTRA_SPEED, speed)
+                },
+                foreground = false
+            )
         }
 
         fun cycleRepeat(context: Context) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_CYCLE_REPEAT
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply { action = ACTION_CYCLE_REPEAT },
+                foreground = false
+            )
         }
 
         fun setRepeatConfig(context: Context, mode: RepeatMode, ayahRepeatCount: Int? = null) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_SET_REPEAT_CONFIG
-                putExtra(EXTRA_REPEAT_MODE, mode.name)
-                if (ayahRepeatCount != null) {
-                    putExtra(EXTRA_AYAH_REPEAT_COUNT, ayahRepeatCount)
-                }
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SET_REPEAT_CONFIG
+                    putExtra(EXTRA_REPEAT_MODE, mode.name)
+                    if (ayahRepeatCount != null) {
+                        putExtra(EXTRA_AYAH_REPEAT_COUNT, ayahRepeatCount)
+                    }
+                },
+                foreground = false
+            )
         }
 
         fun seekTo(context: Context, ms: Long) {
-            context.startService(Intent(context, AudioPlaybackService::class.java).apply {
-                action = ACTION_SEEK
-                putExtra(EXTRA_SEEK_MS, ms)
-            })
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SEEK
+                    putExtra(EXTRA_SEEK_MS, ms)
+                },
+                foreground = false
+            )
+        }
+
+        fun seekBy(context: Context, deltaMs: Long) {
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SEEK_BY
+                    putExtra(EXTRA_SEEK_DELTA_MS, deltaMs)
+                },
+                foreground = false
+            )
+        }
+
+        fun setVolume(context: Context, volume: Float) {
+            val clamped = volume.coerceIn(0f, 1f)
+            AudioPlayerController.updateState { it.copy(volume = clamped) }
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SET_VOLUME
+                    putExtra(EXTRA_VOLUME, clamped)
+                },
+                foreground = false
+            )
+        }
+
+        fun setSleepTimer(context: Context, minutes: Int) {
+            startServiceSafely(
+                context,
+                Intent(context, AudioPlaybackService::class.java).apply {
+                    action = ACTION_SET_SLEEP_TIMER
+                    putExtra(EXTRA_SLEEP_TIMER_MINUTES, minutes.coerceAtLeast(0))
+                },
+                foreground = false
+            )
         }
     }
 }
+

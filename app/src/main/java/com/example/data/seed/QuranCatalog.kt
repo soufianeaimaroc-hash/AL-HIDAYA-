@@ -255,4 +255,12 @@ object QuranCatalog {
     )
 
     fun ayahOfTheDay(dayOfYear: Int): DailyAyah = dailyAyahs[dayOfYear.mod(dailyAyahs.size)]
+
+    fun globalAyahNumber(surahNumber: Int, ayahNumber: Int): Int {
+        if (surahNumber !in 1..114) return 1
+        val offset = surahs.take(surahNumber - 1).sumOf { it.ayahCount }
+        val maxAyah = surahs[surahNumber - 1].ayahCount
+        return offset + ayahNumber.coerceIn(1, maxAyah)
+    }
 }
+

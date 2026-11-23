@@ -25,11 +25,15 @@ import com.example.data.seed.HadithItem
 import com.example.data.seed.HadithSeedData
 import com.example.data.seed.QuranCatalog
 import com.example.data.seed.RuqyahAudioTrack
+import com.example.data.seed.RuqyahCatalog
+import com.example.data.seed.RuqyahCategory
 import com.example.data.seed.SurahInfo
 import com.example.firebase.AuthManager
 import com.example.firebase.FirebaseSyncRepository
+import com.example.prayer.AsrMadhab
 import com.example.prayer.CalculationMethod
 import com.example.prayer.DailyPrayerSchedule
+import com.example.prayer.GpsLocationResult
 import com.example.prayer.LocationHelper
 import com.example.prayer.PrayerNotificationScheduler
 import com.example.prayer.PrayerTimeCalculator
@@ -57,6 +61,19 @@ sealed interface SurahListUiState {
         val syncError: String? = null
     ) : SurahListUiState
     data class Error(val message: String) : SurahListUiState
+}
+
+sealed interface LocationUiState {
+    data object Idle : LocationUiState
+    data object Detecting : LocationUiState
+    data class Updated(
+        val cityLabel: String,
+        val usedOfflineFallback: Boolean = false,
+        val movedCity: Boolean = false
+    ) : LocationUiState
+    data object PermissionDenied : LocationUiState
+    data object WeakSignal : LocationUiState
+    data class Error(val message: String) : LocationUiState
 }
 
 private data class SurahSyncStatus(
@@ -99,12 +116,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _nowMillis = MutableStateFlow(System.currentTimeMillis())
 
     val prayerSchedule: StateFlow<DailyPrayerSchedule> = combine(prefsState, _nowMillis) { prefs, now ->
+        val tz = CitiesCatalog.findTimeZone(
+            cityNameEn = prefs.cityNameEn,
+            latitude = prefs.latitude,
+            longitude = prefs.longitude,
+            preferredTimeZoneId = prefs.timeZoneId,
+            countryCode = prefs.countryCode
+        )
         PrayerTimeCalculator.calculateDailySchedule(
             latitude = prefs.latitude,
             longitude = prefs.longitude,
             method = CalculationMethod.fromId(prefs.calculationMethod),
             nowMillis = now,
-            timeZone = CitiesCatalog.findTimeZone(prefs.cityNameEn, prefs.latitude, prefs.longitude)
+            timeZone = tz,
+            madhab = AsrMadhab.fromId(prefs.asrMadhab),
+            offsets = prefs.toPrayerMinuteOffsets()
         )
     }.stateIn(
         viewModelScope,
@@ -139,25 +165,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, SurahListUiState.Loading)
 
+    private val _locationUiState = MutableStateFlow<LocationUiState>(LocationUiState.Idle)
+    val locationUiState: StateFlow<LocationUiState> = _locationUiState.asStateFlow()
+
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
     private val _downloadingKeys = MutableStateFlow<Set<String>>(emptySet())
     val downloadingKeys: StateFlow<Set<String>> = _downloadingKeys.asStateFlow()
 
+    private val _selectedRuqyahCategory = MutableStateFlow<RuqyahCategory?>(null)
+    val selectedRuqyahCategory: StateFlow<RuqyahCategory?> = _selectedRuqyahCategory.asStateFlow()
+
+    private val _activeRuqyahTrackId = MutableStateFlow("")
+    val activeRuqyahTrackId: StateFlow<String> = _activeRuqyahTrackId.asStateFlow()
+
     private var cloudSyncJob: Job? = null
+    private var lastScheduledDateKey: String = ""
 
     init {
         viewModelScope.launch {
-            repository.ensureStarterDataSeeded()
+            runCatching { repository.ensureStarterDataSeeded() }
             _surahSyncStatus.value = SurahSyncStatus(isLoading = false, isRefreshing = true, errorMessage = null)
-            syncSurahCatalogInternal(forceRefresh = false)
-            PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
+            runCatching { syncSurahCatalogInternal(forceRefresh = false) }
+            runCatching {
+                val initialPrefs = prefsStore.prefsFlow.first()
+                PrayerNotificationScheduler.scheduleDailyPrayers(appContext, initialPrefs)
+                checkLocationMovementOnLaunchIfConsented(initialPrefs)
+            }
         }
         viewModelScope.launch {
             while (true) {
                 delay(1000L)
-                _nowMillis.value = System.currentTimeMillis()
+                val now = System.currentTimeMillis()
+                _nowMillis.value = now
+                val currentPrefs = prefsState.value
+                val tz = CitiesCatalog.findTimeZone(
+                    cityNameEn = currentPrefs.cityNameEn,
+                    latitude = currentPrefs.latitude,
+                    longitude = currentPrefs.longitude,
+                    preferredTimeZoneId = currentPrefs.timeZoneId,
+                    countryCode = currentPrefs.countryCode
+                )
+                val dateKey = PrayerTimeCalculator.dateKeyFor(now, tz)
+                if (dateKey != lastScheduledDateKey) {
+                    lastScheduledDateKey = dateKey
+                    runCatching {
+                        val serialized = PrayerTimeCalculator.serializeSchedule(prayerSchedule.value)
+                        prefsStore.saveCachedSchedule(dateKey, serialized)
+                        PrayerNotificationScheduler.scheduleDailyPrayers(appContext, currentPrefs)
+                    }
+                }
             }
         }
         viewModelScope.launch {
@@ -271,27 +329,116 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectCity(city: CityOption) {
         viewModelScope.launch {
-            prefsStore.setLocation(city.nameAr, city.nameEn, city.latitude, city.longitude)
-            prefsStore.setCalculationMethod(city.defaultMethod)
+            prefsStore.setRichLocation(
+                cityAr = city.nameAr,
+                cityEn = city.nameEn,
+                regionAr = "",
+                regionEn = "",
+                countryAr = city.countryAr,
+                countryEn = city.countryEn,
+                countryCode = city.countryCode,
+                lat = city.latitude,
+                lon = city.longitude,
+                timeZoneId = city.timeZoneId,
+                locationSource = "MANUAL",
+                calculationMethod = city.defaultMethod
+            )
             val updated = prefsStore.prefsFlow.first()
             PrayerNotificationScheduler.scheduleDailyPrayers(appContext, updated)
+            val isAr = updated.language == "ar"
+            _locationUiState.value = LocationUiState.Updated(
+                cityLabel = if (isAr) city.nameAr else city.nameEn,
+                usedOfflineFallback = false,
+                movedCity = false
+            )
             syncProfileIfSignedIn()
         }
     }
 
-    fun detectGpsLocation() {
+    private fun checkLocationMovementOnLaunchIfConsented(prefs: UserPrefsState) {
+        // Battery-friendly: only runs once on launch if user previously consented AND >= 15 minutes since last check
+        val now = System.currentTimeMillis()
+        val elapsedMs = now - prefs.lastGpsCheckMillis
+        if (prefs.gpsConsentGranted && LocationHelper.hasLocationPermission(appContext) && elapsedMs >= 15 * 60_000L) {
+            detectGpsLocation(isAutoCheck = true)
+        }
+    }
+
+    fun setGpsConsentGranted(granted: Boolean) {
         viewModelScope.launch {
-            val res = LocationHelper.detectCurrentLocation(appContext)
-            res.onSuccess { loc ->
-                prefsStore.setLocation(loc.cityAr, loc.cityEn, loc.latitude, loc.longitude)
-                val updated = prefsStore.prefsFlow.first()
-                PrayerNotificationScheduler.scheduleDailyPrayers(appContext, updated)
-                syncProfileIfSignedIn()
-            }.onFailure {
-                _statusBanner.value = if (prefsState.value.language == "ar") {
-                    "تعذر تحديد الموقع تلقائياً، يمكنك اختيار المدينة يدوياً."
-                } else {
-                    "Could not detect GPS location; please pick your city manually."
+            prefsStore.setGpsConsentGranted(granted)
+        }
+    }
+
+    fun markGpsPermissionDenied() {
+        _locationUiState.value = LocationUiState.PermissionDenied
+    }
+
+    fun dismissLocationStatus() {
+        _locationUiState.value = LocationUiState.Idle
+    }
+
+    fun detectGpsLocation(isAutoCheck: Boolean = false) {
+        viewModelScope.launch {
+            if (!isAutoCheck) {
+                prefsStore.setGpsConsentGranted(true)
+                _locationUiState.value = LocationUiState.Detecting
+            }
+            val prevPrefs = prefsStore.prefsFlow.first()
+            val isAr = prevPrefs.language == "ar"
+            val result = LocationHelper.detectCurrentLocationWithStatus(appContext)
+            prefsStore.setLastGpsCheckMillis(System.currentTimeMillis())
+
+            when (result) {
+                is GpsLocationResult.Success -> {
+                    val loc = result.location
+                    val movedSignificantly = LocationHelper.hasMovedSignificantly(
+                        prevLat = prevPrefs.latitude,
+                        prevLon = prevPrefs.longitude,
+                        prevCityEn = prevPrefs.cityNameEn,
+                        next = loc
+                    )
+                    val shouldApplyMethod = movedSignificantly || prevPrefs.locationSource == "DEFAULT"
+                    if (!isAutoCheck || movedSignificantly || prevPrefs.locationSource == "DEFAULT") {
+                        prefsStore.setRichLocation(
+                            cityAr = loc.cityAr,
+                            cityEn = loc.cityEn,
+                            regionAr = loc.regionAr,
+                            regionEn = loc.regionEn,
+                            countryAr = loc.countryAr,
+                            countryEn = loc.countryEn,
+                            countryCode = loc.countryCode,
+                            lat = loc.latitude,
+                            lon = loc.longitude,
+                            timeZoneId = loc.timeZoneId,
+                            locationSource = "GPS",
+                            calculationMethod = if (shouldApplyMethod) loc.suggestedMethodId else null
+                        )
+                        val updated = prefsStore.prefsFlow.first()
+                        PrayerNotificationScheduler.scheduleDailyPrayers(appContext, updated)
+                        syncProfileIfSignedIn()
+                        val displayCity = if (isAr) loc.cityAr else loc.cityEn
+                        _locationUiState.value = LocationUiState.Updated(
+                            cityLabel = displayCity,
+                            usedOfflineFallback = loc.usedOfflineFallback,
+                            movedCity = isAutoCheck && movedSignificantly
+                        )
+                    }
+                }
+                GpsLocationResult.PermissionMissing -> {
+                    if (!isAutoCheck) {
+                        _locationUiState.value = LocationUiState.PermissionDenied
+                    }
+                }
+                GpsLocationResult.WeakSignal -> {
+                    if (!isAutoCheck) {
+                        _locationUiState.value = LocationUiState.WeakSignal
+                    }
+                }
+                is GpsLocationResult.Error -> {
+                    if (!isAutoCheck) {
+                        _locationUiState.value = LocationUiState.Error(result.reason)
+                    }
                 }
             }
         }
@@ -302,6 +449,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             prefsStore.setCalculationMethod(methodId)
             PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
             syncProfileIfSignedIn()
+        }
+    }
+
+    fun setAsrMadhab(madhabId: String) {
+        viewModelScope.launch {
+            prefsStore.setAsrMadhab(madhabId)
+            PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
+        }
+    }
+
+    fun setPrayerOffset(prayerKey: String, minutes: Int) {
+        viewModelScope.launch {
+            prefsStore.setPrayerOffset(prayerKey, minutes)
+            PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
+        }
+    }
+
+    fun resetPrayerOffsets() {
+        viewModelScope.launch {
+            prefsStore.resetPrayerOffsets()
+            PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
+        }
+    }
+
+    fun setPlayAdhanOnNotification(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsStore.setPlayAdhanOnNotification(enabled)
+            PrayerNotificationScheduler.scheduleDailyPrayers(appContext, prefsStore.prefsFlow.first())
         }
     }
 
@@ -457,12 +632,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 val startIdx = tracks.indexOfFirst { it.surahNumber >= safeStart }.coerceAtLeast(0)
-                AudioPlaybackService.startQueue(appContext, tracks, startIdx)
-            }.onFailure {
-                _statusBanner.value = if (isAr) {
-                    "يرجى الاتصال بالإنترنت لتشغيل التلاوة أو تحميلها أولاً"
+                if (tracks.isEmpty()) {
+                    _statusBanner.value = if (isAr) {
+                        "تسجيل هذه السورة غير متوفر حالياً بصوت القارئ عبدالله بن موسى"
+                    } else {
+                        "This Surah recording is currently unavailable for Abdullah bin Mousa."
+                    }
                 } else {
-                    "Connect to the internet to stream or download this recitation."
+                    AudioPlaybackService.startQueue(appContext, tracks, startIdx)
+                }
+            }.onFailure { err ->
+                _statusBanner.value = when {
+                    err.message == QuranAndHadithRepository.RECITER_SURAH_UNAVAILABLE_CODE -> {
+                        if (isAr) "تسجيل هذه السورة غير متوفر حالياً بصوت القارئ عبدالله بن موسى"
+                        else "This Surah recording is currently unavailable for Abdullah bin Mousa."
+                    }
+                    isAr -> "يرجى الاتصال بالإنترنت لتشغيل التلاوة أو تحميلها أولاً"
+                    else -> "Connect to the internet to stream or download this recitation."
                 }
             }
         }
@@ -503,25 +689,92 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         AudioPlaybackService.startQueue(appContext, tracks)
     }
 
+    fun selectRuqyahCategory(category: RuqyahCategory?) {
+        _selectedRuqyahCategory.value = category
+    }
+
+    fun selectRuqyahReciterEdition(edition: String) {
+        viewModelScope.launch {
+            prefsStore.setRuqyahReciterEdition(edition)
+        }
+    }
+
     fun playRuqyahTrack(track: RuqyahAudioTrack) {
         viewModelScope.launch {
             val isAr = prefsState.value.language == "ar"
-            repository.getRuqyahPlaybackSource(track).onSuccess { src ->
-                AudioPlaybackService.startPlay(
-                    context = appContext,
-                    urlOrPath = src,
-                    title = if (isAr) track.titleAr else track.titleEn,
-                    subtitle = if (isAr) track.reciterAr else track.reciterEn,
+            val edition = prefsState.value.ruqyahReciterEdition
+            repository.resolveRuqyahPlaybackPlan(track, edition, isAr).onSuccess { plan ->
+                _activeRuqyahTrackId.value = track.id
+                prefsStore.setLastRuqyah(
                     trackId = track.id,
-                    repeatMode = RepeatMode.CONTINUOUS
+                    title = if (isAr) track.titleAr else track.titleEn,
+                    reciter = if (isAr) plan.resolvedReciterNameAr else plan.resolvedReciterNameEn,
+                    positionMs = 0L
                 )
-            }.onFailure {
-                _statusBanner.value = if (isAr) {
-                    "تعذر تشغيل مقطع الرقية الشرعية، تحقق من الاتصال أو استخدم النص المقروء"
+                if (plan.tracks.size == 1) {
+                    val single = plan.tracks.first()
+                    AudioPlaybackService.startPlay(
+                        context = appContext,
+                        urlOrPath = single.source,
+                        title = single.title,
+                        subtitle = single.subtitle,
+                        trackId = single.trackId,
+                        surahNumber = single.surahNumber,
+                        ayahNumber = single.ayahNumber,
+                        repeatMode = RepeatMode.CONTINUOUS
+                    )
                 } else {
-                    "Unable to stream Ruqyah audio offline. Check connection or read text below."
+                    AudioPlaybackService.startQueue(
+                        context = appContext,
+                        tracks = plan.tracks,
+                        startIndex = 0,
+                        loopWholeQueueOnRepeatSurah = plan.loopWholeQueue
+                    )
+                }
+            }.onFailure { err ->
+                _statusBanner.value = if (err.message == QuranAndHadithRepository.OFFLINE_AUDIO_CODE) {
+                    if (isAr) {
+                        "لا يوجد اتصال بالإنترنت. يرجى الاتصال لتشغيل هذا التسجيل أو تحميله، ويمكنك قراءة النصوص الشرعية دون إنترنت."
+                    } else {
+                        "No internet connection. Connect to stream or download audio, or read the verified texts offline."
+                    }
+                } else {
+                    if (isAr) {
+                        "تعذر تشغيل مقطع الرقية الشرعية، يرجى المحاولة مرة أخرى أو استخدام النص المقروء"
+                    } else {
+                        "Unable to stream Ruqyah audio right now. Check connection or read verified texts below."
+                    }
                 }
             }
+        }
+    }
+
+    fun resumeLastRuqyah() {
+        val lastId = prefsState.value.lastRuqyahTrackId
+        val track = RuqyahCatalog.findTrackById(lastId) ?: RuqyahCatalog.audioTracks.firstOrNull() ?: return
+        _selectedRuqyahCategory.value = track.category
+        playRuqyahTrack(track)
+    }
+
+    fun seekAudioTo(ms: Long) {
+        AudioPlaybackService.seekTo(appContext, ms)
+    }
+
+    fun seekAudioBy(deltaMs: Long) {
+        AudioPlaybackService.seekBy(appContext, deltaMs)
+    }
+
+    fun setAudioVolume(volume: Float) {
+        AudioPlaybackService.setVolume(appContext, volume)
+    }
+
+    fun setSleepTimerMinutes(minutes: Int) {
+        AudioPlaybackService.setSleepTimer(appContext, minutes)
+        val isAr = prefsState.value.language == "ar"
+        _statusBanner.value = if (minutes > 0) {
+            if (isAr) "تم ضبط مؤقت إيقاف التشغيل على $minutes دقيقة" else "Sleep timer set for $minutes min"
+        } else {
+            if (isAr) "تم إلغاء مؤقت الإيقاف" else "Sleep timer turned off"
         }
     }
 
@@ -529,13 +782,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_downloadingKeys.value.contains(track.id)) return
         viewModelScope.launch {
             _downloadingKeys.value = _downloadingKeys.value + track.id
-            val res = repository.downloadRuqyahAudio(track)
+            val edition = prefsState.value.ruqyahReciterEdition
+            val res = repository.downloadRuqyahAudio(track, edition)
             _downloadingKeys.value = _downloadingKeys.value - track.id
-            res.onFailure {
-                _statusBanner.value = if (prefsState.value.language == "ar") {
-                    "تعذر تحميل مقطع الرقية، تحقق من الاتصال"
+            val isAr = prefsState.value.language == "ar"
+            res.onSuccess {
+                _statusBanner.value = if (isAr) {
+                    "تم تحميل «${track.titleAr}» للاستماع دون إنترنت"
                 } else {
-                    "Failed to download Ruqyah audio track."
+                    "Downloaded \"${track.titleEn}\" for offline listening"
+                }
+            }.onFailure {
+                _statusBanner.value = if (isAr) {
+                    "تعذر تحميل مقطع الرقية، يرجى التحقق من اتصال الإنترنت"
+                } else {
+                    "Failed to download Ruqyah audio track. Check your internet connection."
                 }
             }
         }
@@ -549,11 +810,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.loadSurahFromNetworkIfNeeded(surahNumber)
             val res = repository.downloadSurahAudio(surahNumber)
             _downloadingKeys.value = _downloadingKeys.value - key
-            res.onFailure {
-                _statusBanner.value = if (prefsState.value.language == "ar") {
-                    "تعذر تحميل الملف الصوتي، تحقق من اتصال الإنترنت"
-                } else {
-                    "Audio download failed; check your connection."
+            res.onFailure { err ->
+                val isAr = prefsState.value.language == "ar"
+                _statusBanner.value = when {
+                    err.message == QuranAndHadithRepository.RECITER_SURAH_UNAVAILABLE_CODE -> {
+                        if (isAr) "تسجيل هذه السورة غير متوفر حالياً بصوت القارئ عبدالله بن موسى"
+                        else "This Surah recording is currently unavailable for Abdullah bin Mousa."
+                    }
+                    isAr -> "تعذر تحميل الملف الصوتي، تحقق من اتصال الإنترنت"
+                    else -> "Audio download failed; check your connection."
                 }
             }
         }
@@ -591,15 +856,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun shareText(context: Context, text: String) {
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, text)
+        try {
+            val intent = Intent(Intent.ACTION_SEND).apply {
+                type = "text/plain"
+                putExtra(Intent.EXTRA_TEXT, text)
+            }
+            val chooser = Intent.createChooser(intent, null).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(chooser)
+        } catch (_: Exception) {
+            _statusBanner.value = if (prefsState.value.language == "ar") {
+                "تعذر فتح نافذة المشاركة على هذا الجهاز"
+            } else {
+                "Unable to open share sheet on this device."
+            }
         }
-        context.startActivity(Intent.createChooser(intent, null).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
     suspend fun loadHadithChapter(book: HadithBookInfo, chapter: Int): List<HadithItem> =
         repository.loadHadithChapter(book, chapter)
+
+    suspend fun getInstantSurahAyahs(surahNumber: Int): List<CachedSurahAyahEntity> =
+        repository.getInstantSurahAyahs(surahNumber)
 
     suspend fun loadSurahAyahs(surahNumber: Int): Result<List<CachedSurahAyahEntity>> =
         repository.loadSurahFromNetworkIfNeeded(surahNumber)

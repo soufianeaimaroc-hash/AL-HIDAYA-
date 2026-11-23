@@ -65,6 +65,7 @@ import com.example.ui.theme.GoldChampagne
 import com.example.ui.theme.GoldRoyal
 import com.example.ui.theme.SuccessGreen
 import com.example.ui.theme.WarningAmber
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
@@ -97,7 +98,10 @@ fun QiblaScreen(
     }
 
     DisposableEffect(context) {
-        val sm = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+        val sm = context.getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+        if (sm == null) {
+            return@DisposableEffect onDispose {}
+        }
         val rotationSensor = sm.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         val accelSensor = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val magSensor = sm.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
@@ -111,12 +115,16 @@ fun QiblaScreen(
             override fun onSensorChanged(event: SensorEvent) {
                 when (event.sensor.type) {
                     Sensor.TYPE_ROTATION_VECTOR -> {
-                        SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
-                        SensorManager.getOrientation(rotMatrix, orientation)
-                        val rawDeg = Math.toDegrees(orientation[0].toDouble()).toFloat()
-                        azimuthDeg = (rawDeg + declination + 360f) % 360f
+                        if (event.values.size < 3) return
+                        try {
+                            SensorManager.getRotationMatrixFromVector(rotMatrix, event.values)
+                            SensorManager.getOrientation(rotMatrix, orientation)
+                            val rawDeg = Math.toDegrees(orientation[0].toDouble()).toFloat()
+                            azimuthDeg = (rawDeg + declination + 360f) % 360f
+                        } catch (_: Exception) {}
                     }
                     Sensor.TYPE_ACCELEROMETER -> {
+                        if (event.values.size < 3) return
                         System.arraycopy(event.values, 0, gravity, 0, 3)
                         if (rotationSensor == null && SensorManager.getRotationMatrix(rotMatrix, null, gravity, geomagnetic)) {
                             SensorManager.getOrientation(rotMatrix, orientation)
@@ -125,6 +133,7 @@ fun QiblaScreen(
                         }
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
+                        if (event.values.size < 3) return
                         System.arraycopy(event.values, 0, geomagnetic, 0, 3)
                         val bx = event.values[0]
                         val by = event.values[1]
@@ -156,7 +165,7 @@ fun QiblaScreen(
         }
 
         onDispose {
-            sm.unregisterListener(listener)
+            runCatching { sm.unregisterListener(listener) }
         }
     }
 
@@ -200,20 +209,27 @@ fun QiblaScreen(
                         .padding(16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
+                    val locHeader = listOf(
+                        if (isAr) prefs.cityName else prefs.cityNameEn,
+                        if (isAr) prefs.countryNameAr else prefs.countryNameEn
+                    ).filter { it.isNotBlank() }.distinct().joinToString(" • ")
+                    val kaabaKm = remember(prefs.latitude, prefs.longitude) {
+                        com.example.prayer.PrayerTimeCalculator.calculateDistanceToKaabaKm(prefs.latitude, prefs.longitude).toInt()
+                    }
                     Text(
-                        text = if (isAr) prefs.cityName else prefs.cityNameEn,
+                        text = locHeader,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "${s.qiblaAngleLabel}: ${String.format("%.1f", qiblaBearing)}°",
+                        text = "${s.qiblaAngleLabel}: ${String.format(Locale.US, "%.1f", qiblaBearing)}°",
                         style = MaterialTheme.typography.headlineMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "${s.magneticFieldLabel}: ${String.format("%.0f", magneticFieldMicroTesla)} µT",
+                        text = "${s.magneticFieldLabel}: ${String.format(Locale.US, "%.0f", magneticFieldMicroTesla)} µT • $kaabaKm km ${if (isAr) "إلى الكعبة" else "to Kaaba"}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

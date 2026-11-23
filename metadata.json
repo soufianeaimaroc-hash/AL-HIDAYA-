@@ -1,6 +1,6 @@
 {
-  "name": "SOUFIAN ISLAM",
-  "description": "Comprehensive Islamic companion featuring the Holy Quran, Prayer Times, Adhan Library, Adhkar, Qibla Compass, and Authentic Hadith.",
+  "name": "AL HIDAYA – الهداية",
+  "description": "AL HIDAYA – الهداية: Comprehensive Islamic companion featuring the Holy Quran, Ruqyah Shariah, GPS Prayer Times, Adhan Library, Adhkar, Qibla Compass, and Authentic Hadith.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

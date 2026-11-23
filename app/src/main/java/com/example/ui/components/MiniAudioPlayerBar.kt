@@ -149,8 +149,12 @@ fun MiniAudioPlayerBar(
                                 audioState.ayahRepeatTarget <= 0 -> "${s.repeatAyah} (∞)"
                                 else -> "${s.repeatAyah} (${audioState.ayahRepeatDone + 1}/${audioState.ayahRepeatTarget})"
                             }
+                            val timerSuffix = if (audioState.sleepTimerRemainingMs > 0L) {
+                                val mins = ((audioState.sleepTimerRemainingMs + 59_999L) / 60_000L).coerceAtLeast(1L)
+                                " • ${s.ruqyahSleepTimer}: $mins${s.ruqyahMinutesShort}"
+                            } else ""
                             Text(
-                                text = "${audioState.subtitle} • $modeHint",
+                                text = "${audioState.subtitle} • $modeHint$timerSuffix",
                                 style = MaterialTheme.typography.bodySmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,

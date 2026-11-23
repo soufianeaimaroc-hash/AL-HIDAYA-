@@ -2,12 +2,14 @@ package com.example.firebase
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
@@ -43,6 +45,12 @@ object AuthManager {
         awaitClose { auth.removeAuthStateListener(listener) }
     }
 
+    private tailrec fun Context.findActivity(): Activity? = when (this) {
+        is Activity -> this
+        is ContextWrapper -> baseContext?.findActivity()
+        else -> null
+    }
+
     fun attemptAutoSignIn(
         context: Context,
         credentialManager: CredentialManager,
@@ -72,7 +80,8 @@ object AuthManager {
 
         scope.launch {
             try {
-                val cred = credentialManager.getCredential(context, request).credential
+                val requestContext = context.findActivity() ?: context
+                val cred = credentialManager.getCredential(requestContext, request).credential
                 if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
                     Firebase.auth.signInWithCredential(GoogleAuthProvider.getCredential(token, null)).await()
@@ -80,6 +89,8 @@ object AuthManager {
                 } else {
                     onUnauthenticated()
                 }
+            } catch (_: NoCredentialException) {
+                onUnauthenticated()
             } catch (_: Exception) {
                 onUnauthenticated()
             }
@@ -107,7 +118,7 @@ object AuthManager {
 
         scope.launch {
             try {
-                val activityContext = context as? Activity ?: context
+                val activityContext = context.findActivity() ?: context
                 val cred = credentialManager.getCredential(activityContext, request).credential
                 if (cred is CustomCredential && cred.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val token = GoogleIdTokenCredential.createFrom(cred.data).idToken
@@ -119,6 +130,9 @@ object AuthManager {
             } catch (e: GetCredentialCancellationException) {
                 Log.w(TAG, "Google Sign-In cancelled or dismissed: ${e.message}", e)
                 onAuthCancelled()
+            } catch (e: NoCredentialException) {
+                Log.w(TAG, "No Google credential available on device: ${e.message}")
+                onAuthError(e.localizedMessage ?: "No Google account available on this device")
             } catch (e: Exception) {
                 Log.e(TAG, "Google Sign-In failed", e)
                 onAuthError(e.localizedMessage ?: "Sign in failed")
@@ -138,7 +152,7 @@ object AuthManager {
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to clear credential state: ${e.message}")
                 } finally {
-                    Firebase.auth.signOut()
+                    runCatching { Firebase.auth.signOut() }
                     onSignOutComplete()
                 }
             }

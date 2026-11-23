@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -21,14 +23,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.MenuBook
-import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.BookmarkBorder
 import androidx.compose.material.icons.filled.CheckCircle
@@ -41,7 +45,6 @@ import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -88,6 +91,7 @@ import com.example.data.QuranAndHadithRepository
 import com.example.data.local.BookmarkEntity
 import com.example.data.local.CachedSurahAyahEntity
 import com.example.data.local.UserPrefsState
+import com.example.data.seed.BundledQuranLoader
 import com.example.data.seed.QuranCatalog
 import com.example.ui.components.GoldOrnamentalDivider
 import com.example.ui.theme.AmiriFontFamily
@@ -115,30 +119,50 @@ fun SurahReaderScreen(
     onDownloadSurah: (Int) -> Unit,
     onToggleBookmark: (String, String, String, String, String) -> Unit,
     onShareText: (String) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    loadInstantSurahAyahs: (suspend (Int) -> List<CachedSurahAyahEntity>)? = null
 ) {
     BackHandler { onBack() }
 
     val s = LocalAppStrings.current
     val context = LocalContext.current
     val isAr = prefs.language == "ar"
-    val surah = QuranCatalog.surahs.getOrNull(surahNumber - 1) ?: QuranCatalog.surahs.first()
 
-    var isMushafMode by remember(initialPageMode) { mutableStateOf(initialPageMode) }
+    var activeSurahNumber by remember(surahNumber) { mutableIntStateOf(surahNumber.coerceIn(1, 114)) }
+    val surah = remember(activeSurahNumber) {
+        QuranCatalog.surahs.getOrNull(activeSurahNumber - 1) ?: QuranCatalog.surahs.first()
+    }
+
+    var isMushafMode by remember(surahNumber, initialPageMode) { mutableStateOf(initialPageMode) }
     var showMushafImage by remember { mutableStateOf(true) }
-    var currentPage by remember(surahNumber) { mutableIntStateOf(surah.startPage.coerceIn(1, 604)) }
+    var currentPage by remember(surahNumber) {
+        mutableIntStateOf((QuranCatalog.surahs.getOrNull(surahNumber.coerceIn(1, 114) - 1)?.startPage ?: 1).coerceIn(1, 604))
+    }
     var showJumpDialog by remember { mutableStateOf(false) }
 
-    var ayahs by remember { mutableStateOf<List<CachedSurahAyahEntity>>(emptyList()) }
-    var surahLoading by remember { mutableStateOf(true) }
-    var surahError by remember { mutableStateOf<String?>(null) }
+    var ayahs by remember(activeSurahNumber) {
+        mutableStateOf(
+            BundledQuranLoader.getCachedSurahAyahsOrNull(activeSurahNumber)
+                ?.filter { it.arabicTextUthmani.isNotBlank() }
+                .orEmpty()
+        )
+    }
+    var surahLoading by remember(activeSurahNumber) { mutableStateOf(ayahs.isEmpty()) }
+    var surahError by remember(activeSurahNumber) { mutableStateOf<String?>(null) }
 
-    var pageAyahs by remember { mutableStateOf<List<CachedSurahAyahEntity>>(emptyList()) }
-    var pageLoading by remember { mutableStateOf(false) }
-    var pageError by remember { mutableStateOf<String?>(null) }
+    var pageAyahs by remember(currentPage) {
+        mutableStateOf(
+            BundledQuranLoader.getCachedPageAyahsOrNull(currentPage)
+                ?.filter { it.arabicTextUthmani.isNotBlank() }
+                .orEmpty()
+        )
+    }
+    var pageLoading by remember(currentPage) { mutableStateOf(false) }
+    var pageError by remember(currentPage) { mutableStateOf<String?>(null) }
 
-    var expandedTafsirKey by remember { mutableStateOf<String?>(null) }
+    var expandedTafsirKey by remember(activeSurahNumber) { mutableStateOf<String?>(null) }
     var reloadNonce by remember { mutableIntStateOf(0) }
+    val verseListState = rememberLazyListState()
 
     val activeSurah = remember(isMushafMode, pageAyahs, currentPage, surah) {
         if (!isMushafMode) surah
@@ -149,32 +173,69 @@ fun SurahReaderScreen(
         }
     }
 
+    val navigateToSurah: (Int) -> Unit = { targetNum ->
+        val safeTarget = targetNum.coerceIn(1, 114)
+        val targetInfo = QuranCatalog.surahs[safeTarget - 1]
+        activeSurahNumber = safeTarget
+        currentPage = targetInfo.startPage.coerceIn(1, 604)
+        expandedTafsirKey = null
+        onUpdateLastRead(safeTarget, 1, targetInfo.arabicName)
+    }
+
     val audioKey = "surah_${activeSurah.number.toString().padStart(3, '0')}_abdullah_mousa"
     val isDownloaded = downloadedKeys.contains(audioKey)
     val isDownloading = downloadingKeys.contains(audioKey)
 
-    LaunchedEffect(surahNumber, reloadNonce) {
-        surahLoading = true
+    LaunchedEffect(activeSurahNumber) {
+        verseListState.scrollToItem(0)
+    }
+
+    LaunchedEffect(isMushafMode) {
+        if (!isMushafMode && ayahs.isEmpty() && !surahLoading) {
+            reloadNonce++
+        }
+    }
+
+    LaunchedEffect(activeSurahNumber, reloadNonce) {
         surahError = null
-        if (!initialPageMode) {
+        val instant = loadInstantSurahAyahs?.invoke(activeSurahNumber)
+            ?.filter { it.arabicTextUthmani.isNotBlank() }
+            .orEmpty()
+        if (instant.isNotEmpty()) {
+            ayahs = instant
+            surahLoading = false
+        } else if (ayahs.isEmpty()) {
+            surahLoading = true
+        }
+        if (!isMushafMode) {
             onUpdateLastRead(surah.number, 1, surah.arabicName)
         }
-        val res = loadSurahAyahs(surahNumber)
-        res.onSuccess { list ->
-            ayahs = list
+        val res = loadSurahAyahs(activeSurahNumber)
+        res.onSuccess { rawList ->
+            val validList = rawList.filter { it.arabicTextUthmani.isNotBlank() }
+            if (validList.isNotEmpty()) {
+                ayahs = validList
+                surahError = null
+            }
             surahLoading = false
         }.onFailure { err ->
-            surahError = err.localizedMessage ?: s.offlineNotice
+            if (ayahs.isEmpty()) {
+                surahError = err.localizedMessage ?: s.offlineNotice
+            }
             surahLoading = false
         }
     }
 
     LaunchedEffect(isMushafMode, currentPage, reloadNonce) {
         if (isMushafMode) {
-            pageLoading = true
+            if (pageAyahs.isEmpty()) pageLoading = true
             pageError = null
-            loadMushafPage(currentPage).onSuccess { list ->
-                pageAyahs = list
+            loadMushafPage(currentPage).onSuccess { rawList ->
+                val list = rawList.filter { it.arabicTextUthmani.isNotBlank() }
+                if (list.isNotEmpty()) {
+                    pageAyahs = list
+                    pageError = null
+                }
                 pageLoading = false
                 val first = list.firstOrNull()
                 if (first != null) {
@@ -184,7 +245,9 @@ fun SurahReaderScreen(
                     }
                 }
             }.onFailure { err ->
-                pageError = err.localizedMessage ?: s.offlineNotice
+                if (pageAyahs.isEmpty()) {
+                    pageError = err.localizedMessage ?: s.offlineNotice
+                }
                 pageLoading = false
             }
         }
@@ -236,6 +299,7 @@ fun SurahReaderScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         TopAppBar(
+            windowInsets = WindowInsets(0, 0, 0, 0),
             title = {
                 Column {
                     Text(
@@ -283,7 +347,7 @@ fun SurahReaderScreen(
         )
 
         // Mode switcher (Verse View vs Real Mushaf Page View + Sequential Play Once)
-        Row(
+        LazyRow(
             modifier = Modifier
                 .fillMaxWidth()
                 .widthIn(max = 840.dp)
@@ -291,32 +355,55 @@ fun SurahReaderScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            FilterChip(
-                selected = !isMushafMode,
-                onClick = { isMushafMode = false },
-                label = { Text(s.verseMode) },
-                leadingIcon = { Icon(Icons.Filled.RecordVoiceOver, null, Modifier.size(16.dp)) },
-                modifier = Modifier.testTag("mode_verse_chip")
-            )
-            FilterChip(
-                selected = isMushafMode,
-                onClick = { isMushafMode = true },
-                label = { Text("${s.mushafPageMode} ($currentPage/604)") },
-                leadingIcon = { Icon(Icons.AutoMirrored.Filled.MenuBook, null, Modifier.size(16.dp)) },
-                modifier = Modifier.testTag("mode_mushaf_chip")
-            )
-            Spacer(Modifier.weight(1f))
-            TextButton(
-                onClick = { onPlayQuranOnceFromSurah(activeSurah.number) },
-                modifier = Modifier.testTag("reader_play_from_here_once")
-            ) {
-                Icon(Icons.Filled.PlayArrow, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    text = s.playFromHereToEndOnce,
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
+            item {
+                FilterChip(
+                    selected = !isMushafMode,
+                    onClick = {
+                        val targetSurah = if (isMushafMode) activeSurah else surah
+                        if (targetSurah.number != activeSurahNumber) {
+                            activeSurahNumber = targetSurah.number
+                            expandedTafsirKey = null
+                        }
+                        isMushafMode = false
+                        val targetAyah = pageAyahs.firstOrNull { it.surahNumber == targetSurah.number }?.ayahNumber ?: 1
+                        onUpdateLastRead(targetSurah.number, targetAyah, targetSurah.arabicName)
+                    },
+                    label = { Text(s.verseMode, maxLines = 1) },
+                    leadingIcon = { Icon(Icons.Filled.RecordVoiceOver, null, Modifier.size(16.dp)) },
+                    modifier = Modifier.testTag("mode_verse_chip")
                 )
+            }
+            item {
+                FilterChip(
+                    selected = isMushafMode,
+                    onClick = {
+                        if (!isMushafMode) {
+                            val nextSurahStart = QuranCatalog.surahs.getOrNull(surah.number)?.startPage ?: 605
+                            if (currentPage < surah.startPage || currentPage >= nextSurahStart) {
+                                currentPage = surah.startPage.coerceIn(1, 604)
+                            }
+                        }
+                        isMushafMode = true
+                    },
+                    label = { Text("${s.mushafPageMode} ($currentPage/604)", maxLines = 1) },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.MenuBook, null, Modifier.size(16.dp)) },
+                    modifier = Modifier.testTag("mode_mushaf_chip")
+                )
+            }
+            item {
+                TextButton(
+                    onClick = { onPlayQuranOnceFromSurah(activeSurah.number) },
+                    modifier = Modifier.testTag("reader_play_from_here_once")
+                ) {
+                    Icon(Icons.Filled.PlayArrow, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        text = s.playFromHereToEndOnce,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
             }
         }
 
@@ -370,25 +457,35 @@ fun SurahReaderScreen(
             }
         }
 
-        if (!isMushafMode && surahLoading) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        if (!isMushafMode && surahLoading && ayahs.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .testTag("reader_loading"),
+                contentAlignment = Alignment.Center
+            ) {
                 CircularProgressIndicator(color = GoldRoyal)
             }
-        } else if (!isMushafMode && surahError != null && ayahs.isEmpty()) {
+        } else if (!isMushafMode && ayahs.isEmpty()) {
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .padding(24.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(surahError ?: s.offlineNotice, textAlign = TextAlign.Center)
                 Spacer(Modifier.height(12.dp))
-                Button(onClick = {
-                    surahLoading = true
-                    surahError = null
-                    reloadNonce++
-                }) {
+                Button(
+                    onClick = {
+                        surahLoading = true
+                        surahError = null
+                        reloadNonce++
+                    },
+                    modifier = Modifier.testTag("reader_retry_button")
+                ) {
                     Text(s.retry)
                 }
             }
@@ -396,7 +493,8 @@ fun SurahReaderScreen(
             // Authentic Mushaf Page Mode (1..604): Real Madinah Image + Formatted Multi-Surah Uthmani Fallback
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .weight(1f)
+                    .fillMaxWidth()
                     .widthIn(max = 840.dp)
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             ) {
@@ -419,7 +517,7 @@ fun SurahReaderScreen(
                         selected = !showMushafImage,
                         onClick = { showMushafImage = false },
                         label = { Text(s.mushafTextTab, style = MaterialTheme.typography.labelSmall) },
-                        leadingIcon = { Icon(Icons.Filled.Article, null, Modifier.size(15.dp)) },
+                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.Article, null, Modifier.size(15.dp)) },
                         modifier = Modifier.testTag("mushaf_display_text")
                     )
                     Spacer(Modifier.weight(1f))
@@ -428,7 +526,7 @@ fun SurahReaderScreen(
                         enabled = pageAyahs.isNotEmpty(),
                         modifier = Modifier.testTag("mushaf_play_page_once")
                     ) {
-                        Icon(Icons.Filled.VolumeUp, contentDescription = s.playPageOnce, modifier = Modifier.size(16.dp))
+                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = s.playPageOnce, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(4.dp))
                         Text(s.playPageOnce, style = MaterialTheme.typography.labelMedium)
                     }
@@ -491,7 +589,8 @@ fun SurahReaderScreen(
                                 SubcomposeAsyncImage(
                                     model = ImageRequest.Builder(context)
                                         .data(imageUrl)
-                                        .crossfade(true)
+                                        .allowHardware(false)
+                                        .crossfade(false)
                                         .build(),
                                     contentDescription = "${s.pageLabel} $currentPage",
                                     contentScale = ContentScale.FillWidth,
@@ -502,13 +601,6 @@ fun SurahReaderScreen(
                                                 modifier = Modifier.fillMaxWidth(),
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
-                                                CircularProgressIndicator(
-                                                    color = GoldRoyal,
-                                                    modifier = Modifier
-                                                        .padding(vertical = 8.dp)
-                                                        .size(24.dp),
-                                                    strokeWidth = 2.dp
-                                                )
                                                 MushafFormattedUthmaniPage(
                                                     pageAyahs = pageAyahs,
                                                     fontSize = prefs.quranFontSize,
@@ -547,6 +639,7 @@ fun SurahReaderScreen(
                                         SubcomposeAsyncImageContent(
                                             modifier = Modifier
                                                 .fillMaxWidth()
+                                                .aspectRatio(1024f / 1656f)
                                                 .clip(RoundedCornerShape(10.dp))
                                         )
                                     }
@@ -610,16 +703,57 @@ fun SurahReaderScreen(
         } else {
             // Verse-by-Verse Reader with Tafsir Al-Muyassar, Translation, & Audio
             LazyColumn(
+                state = verseListState,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .widthIn(max = 840.dp),
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .widthIn(max = 840.dp)
+                    .testTag("quran_reader_verse_list"),
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                if (surahNumber != 9 && surahNumber != 1) {
-                    item {
+                item(key = "surah_header_nav_${surah.number}") {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { navigateToSurah(surah.number - 1) },
+                            enabled = surah.number > 1,
+                            modifier = Modifier.testTag("reader_prev_surah")
+                        ) {
+                            Text(s.prevSurahLabel, style = MaterialTheme.typography.labelMedium)
+                        }
                         Surface(
-                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(50),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                            border = BorderStroke(1.dp, GoldRoyal.copy(alpha = 0.45f))
+                        ) {
+                            Text(
+                                text = "${surah.number} / 114 • ${ayahs.size} ${s.ayahsLabel}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { navigateToSurah(surah.number + 1) },
+                            enabled = surah.number < 114,
+                            modifier = Modifier.testTag("reader_next_surah")
+                        ) {
+                            Text(s.nextSurahLabel, style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+
+                if (surah.number != 9 && surah.number != 1) {
+                    item(key = "bismillah_${surah.number}") {
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("surah_bismillah_banner"),
                             shape = RoundedCornerShape(16.dp),
                             color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
                             border = BorderStroke(1.dp, GoldRoyal.copy(alpha = 0.45f))
@@ -631,7 +765,9 @@ fun SurahReaderScreen(
                                 fontWeight = FontWeight.Bold,
                                 textAlign = TextAlign.Center,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                modifier = Modifier.padding(14.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(14.dp)
                             )
                         }
                     }
@@ -646,7 +782,9 @@ fun SurahReaderScreen(
                         audioState.currentAyahNumber == ayah.ayahNumber
 
                     Card(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ayah_card_${ayah.ayahNumber}"),
                         shape = RoundedCornerShape(18.dp),
                         colors = CardDefaults.cardColors(
                             containerColor = if (isPlayingThisAyah) {
@@ -689,15 +827,19 @@ fun SurahReaderScreen(
                                             onUpdateLastRead(surah.number, ayah.ayahNumber, surah.arabicName)
                                             onPlayAyah(ayah.surahNumber, ayah.globalAyahNumber, ayah.ayahNumber)
                                         },
-                                        modifier = Modifier.size(48.dp)
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("ayah_play_${ayah.ayahNumber}")
                                     ) {
-                                        Icon(Icons.Filled.VolumeUp, contentDescription = "Listen Ayah", tint = MaterialTheme.colorScheme.primary)
+                                        Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Listen Ayah", tint = MaterialTheme.colorScheme.primary)
                                     }
                                     IconButton(
                                         onClick = {
                                             expandedTafsirKey = if (isTafsirOpen) null else ayah.globalKey
                                         },
-                                        modifier = Modifier.size(48.dp)
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("ayah_tafsir_${ayah.ayahNumber}")
                                     ) {
                                         Icon(
                                             Icons.Filled.Info,
@@ -716,7 +858,9 @@ fun SurahReaderScreen(
                                                 ayah.arabicTextUthmani
                                             )
                                         },
-                                        modifier = Modifier.size(48.dp)
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("ayah_bookmark_${ayah.ayahNumber}")
                                     ) {
                                         Icon(
                                             imageVector = if (isBookmarked) Icons.Filled.Bookmark else Icons.Filled.BookmarkBorder,
@@ -726,9 +870,11 @@ fun SurahReaderScreen(
                                     }
                                     IconButton(
                                         onClick = {
-                                            onShareText("${ayah.arabicTextUthmani}\n\n${ayah.englishTranslation}\n(سورة ${surah.arabicName}: ${ayah.ayahNumber}) - SOUFIAN ISLAM")
+                                            onShareText("${ayah.arabicTextUthmani}\n\n${ayah.englishTranslation}\n(سورة ${surah.arabicName}: ${ayah.ayahNumber}) - AL HIDAYA – الهداية")
                                         },
-                                        modifier = Modifier.size(48.dp)
+                                        modifier = Modifier
+                                            .size(48.dp)
+                                            .testTag("ayah_share_${ayah.ayahNumber}")
                                     ) {
                                         Icon(Icons.Filled.Share, contentDescription = s.shareText)
                                     }
@@ -738,13 +884,15 @@ fun SurahReaderScreen(
                             Spacer(modifier = Modifier.height(8.dp))
 
                             Text(
-                                text = "${ayah.arabicTextUthmani} ﴿${ayah.ayahNumber}﴾",
+                                text = "${ayah.arabicTextUthmani} ﴿${toArabicIndicNumber(ayah.ayahNumber)}﴾",
                                 fontFamily = AmiriFontFamily,
                                 fontSize = prefs.quranFontSize.sp,
-                                lineHeight = (prefs.quranFontSize * 1.75).sp,
+                                lineHeight = (prefs.quranFontSize * 1.8).sp,
                                 textAlign = TextAlign.Right,
                                 color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.fillMaxWidth()
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("ayah_text_${ayah.ayahNumber}")
                             )
 
                             if (ayah.englishTranslation.isNotBlank()) {
@@ -778,9 +926,41 @@ fun SurahReaderScreen(
                         }
                     }
                 }
+
+                item(key = "surah_footer_nav_${surah.number}") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 4.dp, bottom = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = { navigateToSurah(surah.number - 1) },
+                            enabled = surah.number > 1,
+                            modifier = Modifier.testTag("reader_footer_prev_surah")
+                        ) {
+                            Text(s.prevSurahLabel)
+                        }
+                        Button(
+                            onClick = { navigateToSurah(surah.number + 1) },
+                            enabled = surah.number < 114,
+                            modifier = Modifier.testTag("reader_footer_next_surah")
+                        ) {
+                            Text(s.nextSurahLabel)
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+private fun toArabicIndicNumber(number: Int): String {
+    val digits = charArrayOf('٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩')
+    return number.toString().map { ch ->
+        if (ch in '0'..'9') digits[ch - '0'] else ch
+    }.joinToString("")
 }
 
 @Composable
@@ -876,7 +1056,8 @@ private fun MushafFormattedUthmaniPage(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .testTag("mushaf_uthmani_page_text"),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         groupedSurahs.forEach { (surahNum, surahAyahs) ->
@@ -899,10 +1080,21 @@ private fun MushafFormattedUthmaniPage(
                         modifier = Modifier.padding(vertical = 8.dp, horizontal = 12.dp)
                     )
                 }
+                if (surahNum != 1 && surahNum != 9) {
+                    Text(
+                        text = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
+                        fontFamily = AmiriFontFamily,
+                        fontSize = (fontSize + 1).sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        color = textColor,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
             val combinedText = remember(surahAyahs) {
                 surahAyahs.joinToString("  ") { ayah ->
-                    "${ayah.arabicTextUthmani} ﴿${ayah.ayahNumber}﴾"
+                    "${ayah.arabicTextUthmani} ﴿${toArabicIndicNumber(ayah.ayahNumber)}﴾"
                 }
             }
             Text(

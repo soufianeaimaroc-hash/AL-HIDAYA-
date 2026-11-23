@@ -4,28 +4,43 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.AccessTimeFilled
 import androidx.compose.material.icons.filled.AutoStories
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.VolunteerActivism
 import androidx.compose.material.icons.outlined.AccessTime
 import androidx.compose.material.icons.outlined.AutoStories
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.VolunteerActivism
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -36,18 +51,30 @@ import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -60,6 +87,8 @@ import androidx.navigation.navArgument
 import com.example.core.LocalAppStrings
 import com.example.firebase.AuthManager
 import com.example.ui.MainViewModel
+import com.example.ui.components.GoldOrnamentalDivider
+import com.example.ui.components.IslamicHeroCanvasBackground
 import com.example.ui.components.MiniAudioPlayerBar
 import com.example.ui.screens.AboutDeveloperScreen
 import com.example.ui.screens.AdhkarAndTasbihScreen
@@ -68,9 +97,16 @@ import com.example.ui.screens.HomeScreen
 import com.example.ui.screens.PrayerAndAdhanScreen
 import com.example.ui.screens.QiblaScreen
 import com.example.ui.screens.QuranScreen
+import com.example.ui.screens.RuqyahScreen
 import com.example.ui.screens.SettingsAndAccountScreen
 import com.example.ui.screens.SurahReaderScreen
-import com.example.ui.theme.SoufianIslamTheme
+import com.example.ui.theme.AlHidayaTheme
+import com.example.ui.theme.EmeraldDeep
+import com.example.ui.theme.EmeraldPrimary
+import com.example.ui.theme.GoldChampagne
+import com.example.ui.theme.GoldRoyal
+import com.example.ui.theme.PlayfairFontFamily
+import kotlinx.coroutines.delay
 
 object Routes {
     const val HOME = "home"
@@ -78,6 +114,7 @@ object Routes {
     const val PRAYER = "prayer?tab={tab}"
     const val QIBLA = "qibla"
     const val ADHKAR = "adhkar?tab={tab}"
+    const val RUQYAH = "ruqyah"
     const val HADITH = "hadith"
     const val SETTINGS = "settings"
     const val SURAH_READER = "surah_reader/{surahNumber}/{pageMode}"
@@ -102,13 +139,13 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val viewModel: MainViewModel = viewModel()
-            SoufianIslamApp(viewModel)
+            AlHidayaApp(viewModel)
         }
     }
 }
 
 @Composable
-fun SoufianIslamApp(viewModel: MainViewModel) {
+fun AlHidayaApp(viewModel: MainViewModel) {
     val prefs by viewModel.prefsState.collectAsStateWithLifecycle()
     val currentUser by viewModel.currentUser.collectAsStateWithLifecycle()
     val schedule by viewModel.prayerSchedule.collectAsStateWithLifecycle()
@@ -119,11 +156,21 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
     val downloadingKeys by viewModel.downloadingKeys.collectAsStateWithLifecycle()
     val cachedSurahs by viewModel.cachedSurahNumbers.collectAsStateWithLifecycle()
     val surahListState by viewModel.surahListState.collectAsStateWithLifecycle()
+    val locationUiState by viewModel.locationUiState.collectAsStateWithLifecycle()
     val audioState by viewModel.audioState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
+    val selectedRuqyahCategory by viewModel.selectedRuqyahCategory.collectAsStateWithLifecycle()
+    val activeRuqyahTrackId by viewModel.activeRuqyahTrackId.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    var showSplash by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        delay(1100L)
+        showSplash = false
+    }
 
     LaunchedEffect(Unit) {
         val cm = CredentialManager.create(context)
@@ -136,7 +183,7 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
         )
     }
 
-    SoufianIslamTheme(
+    AlHidayaTheme(
         themeMode = prefs.themeMode,
         language = prefs.language
     ) {
@@ -155,10 +202,11 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
 
         val tabs = listOf(
             NavTab(Routes.HOME, Routes.HOME, s.navHome, Icons.Filled.Home, Icons.Outlined.Home),
-            NavTab(Routes.QURAN, Routes.QURAN, s.navQuran, Icons.Filled.MenuBook, Icons.Outlined.MenuBook),
+            NavTab(Routes.QURAN, Routes.QURAN, s.navQuran, Icons.AutoMirrored.Filled.MenuBook, Icons.AutoMirrored.Outlined.MenuBook),
             NavTab(Routes.prayer(0), "prayer", s.navPrayer, Icons.Filled.AccessTimeFilled, Icons.Outlined.AccessTime),
             NavTab(Routes.QIBLA, Routes.QIBLA, s.navQibla, Icons.Filled.Explore, Icons.Outlined.Explore),
             NavTab(Routes.adhkar(0), "adhkar", s.navAdhkar, Icons.Filled.VolunteerActivism, Icons.Outlined.VolunteerActivism),
+            NavTab(Routes.RUQYAH, Routes.RUQYAH, s.ruqyahTitle, Icons.Filled.Shield, Icons.Outlined.Shield),
             NavTab(Routes.HADITH, Routes.HADITH, s.navHadith, Icons.Filled.AutoStories, Icons.Outlined.AutoStories),
             NavTab(Routes.SETTINGS, Routes.SETTINGS, s.navSettings, Icons.Filled.Settings, Icons.Outlined.Settings)
         )
@@ -181,8 +229,8 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                                 onSetRepeatConfig = viewModel::setRepeatConfig
                             )
                             NavigationBar {
-                                // Show 5 primary tabs on compact phone bottom bar; Hadith & Adhkar accessible via Quick Cards & Settings/Tabs
-                                val compactTabs = listOf(tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[6])
+                                // Show primary tabs on compact phone bottom bar; Ruqyah, Hadith & Adhkar accessible via Quick Cards & Rail
+                                val compactTabs = listOf(tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[7])
                                 compactTabs.forEach { tab ->
                                     val selected = currentRoute.startsWith(tab.baseRoute)
                                     NavigationBarItem(
@@ -277,7 +325,7 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                                         navController.navigate(Routes.surahReader(surahNum, false))
                                     },
                                     onNavigateAdhkar = { navController.navigate(Routes.adhkar(0)) },
-                                    onNavigateRuqyah = { navController.navigate(Routes.adhkar(2)) },
+                                    onNavigateRuqyah = { navController.navigate(Routes.RUQYAH) },
                                     onNavigateHadith = { navController.navigate(Routes.HADITH) },
                                     onNavigateQibla = { navController.navigate(Routes.QIBLA) },
                                     onNavigateAdhan = { navController.navigate(Routes.prayer(1)) },
@@ -324,6 +372,7 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                                     audioState = audioState,
                                     downloadedKeys = downloadedKeys,
                                     downloadingKeys = downloadingKeys,
+                                    loadInstantSurahAyahs = viewModel::getInstantSurahAyahs,
                                     loadSurahAyahs = viewModel::loadSurahAyahs,
                                     loadMushafPage = viewModel::loadMushafPage,
                                     onUpdateLastRead = viewModel::updateLastRead,
@@ -356,10 +405,18 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                                     audioState = audioState,
                                     downloadedKeys = downloadedKeys,
                                     downloadingKeys = downloadingKeys,
-                                    onDetectGps = viewModel::detectGpsLocation,
+                                    locationUiState = locationUiState,
+                                    qiblaBearing = qiblaBearing,
+                                    onDetectGps = { viewModel.detectGpsLocation(isAutoCheck = false) },
+                                    onPermissionDenied = viewModel::markGpsPermissionDenied,
+                                    onDismissLocationStatus = viewModel::dismissLocationStatus,
                                     onSelectCity = viewModel::selectCity,
                                     onSelectMethod = viewModel::setCalculationMethod,
+                                    onSelectAsrMadhab = viewModel::setAsrMadhab,
+                                    onSetPrayerOffset = viewModel::setPrayerOffset,
+                                    onResetOffsets = viewModel::resetPrayerOffsets,
                                     onTogglePrayerAlert = viewModel::setPrayerEnabled,
+                                    onTogglePlayAdhanOnNotification = viewModel::setPlayAdhanOnNotification,
                                     onPreviewAdhan = viewModel::previewAdhan,
                                     onDownloadAdhan = viewModel::downloadAdhanForOffline,
                                     onAssignAdhan = viewModel::assignPrayerAdhan
@@ -391,12 +448,48 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                                     audioState = audioState,
                                     downloadedKeys = downloadedKeys,
                                     downloadingKeys = downloadingKeys,
+                                    selectedRuqyahCategory = selectedRuqyahCategory,
+                                    activeRuqyahTrackId = activeRuqyahTrackId,
                                     onUpdateCategoryProgress = viewModel::updateAdhkarProgress,
                                     onIncrementTasbih = viewModel::incrementTasbih,
                                     onSetTasbihTarget = viewModel::setTasbihTarget,
                                     onToggleBookmark = viewModel::toggleBookmark,
                                     onPlayRuqyah = viewModel::playRuqyahTrack,
-                                    onDownloadRuqyah = viewModel::downloadRuqyahTrack
+                                    onDownloadRuqyah = viewModel::downloadRuqyahTrack,
+                                    onSelectRuqyahCategory = viewModel::selectRuqyahCategory,
+                                    onSelectRuqyahReciterEdition = viewModel::selectRuqyahReciterEdition,
+                                    onResumeLastRuqyah = viewModel::resumeLastRuqyah,
+                                    onSeekAudioTo = viewModel::seekAudioTo,
+                                    onSeekAudioBy = viewModel::seekAudioBy,
+                                    onSetAudioVolume = viewModel::setAudioVolume,
+                                    onSetSleepTimerMinutes = viewModel::setSleepTimerMinutes,
+                                    onSetRepeatConfig = viewModel::setRepeatConfig,
+                                    onShareText = { txt -> viewModel.shareText(context, txt) }
+                                )
+                            }
+
+                            composable(Routes.RUQYAH) {
+                                RuqyahScreen(
+                                    prefs = prefs,
+                                    audioState = audioState,
+                                    bookmarks = bookmarks,
+                                    downloadedKeys = downloadedKeys,
+                                    downloadingKeys = downloadingKeys,
+                                    selectedCategory = selectedRuqyahCategory,
+                                    activeRuqyahTrackId = activeRuqyahTrackId,
+                                    onSelectCategory = viewModel::selectRuqyahCategory,
+                                    onSelectReciterEdition = viewModel::selectRuqyahReciterEdition,
+                                    onPlayRuqyah = viewModel::playRuqyahTrack,
+                                    onResumeLastRuqyah = viewModel::resumeLastRuqyah,
+                                    onDownloadRuqyah = viewModel::downloadRuqyahTrack,
+                                    onSeekTo = viewModel::seekAudioTo,
+                                    onSeekBy = viewModel::seekAudioBy,
+                                    onSetVolume = viewModel::setAudioVolume,
+                                    onSetSleepTimerMinutes = viewModel::setSleepTimerMinutes,
+                                    onSetRepeatConfig = viewModel::setRepeatConfig,
+                                    onToggleBookmark = viewModel::toggleBookmark,
+                                    onShareText = { txt -> viewModel.shareText(context, txt) },
+                                    onBack = { navController.popBackStack() }
                                 )
                             }
 
@@ -430,6 +523,92 @@ fun SoufianIslamApp(viewModel: MainViewModel) {
                     }
                 }
             }
+
+            AnimatedVisibility(
+                visible = showSplash,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                AlHidayaSplashOverlay(
+                    appName = s.appName,
+                    appSubtitle = s.appSubtitle,
+                    developerCredit = "${s.developerProfessionalName} • ${s.developerRole}",
+                    onDismiss = { showSplash = false }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlHidayaSplashOverlay(
+    appName: String,
+    appSubtitle: String,
+    developerCredit: String,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Brush.verticalGradient(listOf(EmeraldDeep, EmeraldPrimary, EmeraldDeep)))
+            .clickable(onClick = onDismiss)
+            .testTag("al_hidaya_splash_screen"),
+        contentAlignment = Alignment.Center
+    ) {
+        IslamicHeroCanvasBackground(modifier = Modifier.fillMaxSize())
+        Column(
+            modifier = Modifier
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Surface(
+                shape = RoundedCornerShape(30.dp),
+                color = EmeraldDeep,
+                shadowElevation = 14.dp,
+                border = BorderStroke(2.5.dp, GoldChampagne),
+                modifier = Modifier.size(136.dp)
+            ) {
+                Image(
+                    painter = painterResource(id = R.drawable.img_al_hidaya_emblem),
+                    contentDescription = appName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(30.dp))
+                )
+            }
+
+            Spacer(modifier = Modifier.height(22.dp))
+
+            Text(
+                text = appName,
+                fontFamily = PlayfairFontFamily,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                color = GoldChampagne,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = appSubtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Color.White.copy(alpha = 0.90f),
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(20.dp))
+            GoldOrnamentalDivider(modifier = Modifier.padding(horizontal = 40.dp))
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Text(
+                text = developerCredit,
+                style = MaterialTheme.typography.labelMedium,
+                color = GoldChampagne.copy(alpha = 0.85f),
+                textAlign = TextAlign.Center
+            )
         }
     }
 }

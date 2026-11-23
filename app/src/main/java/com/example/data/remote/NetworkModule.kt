@@ -24,7 +24,7 @@ object NetworkModule {
             .addInterceptor { chain ->
                 val request = chain.request().newBuilder()
                     .header("Accept", "application/json")
-                    .header("User-Agent", "SoufianIslamAndroid/1.0")
+                    .header("User-Agent", "AlHidayaAndroid/1.0")
                     .build()
                 chain.proceed(request)
             }
@@ -70,9 +70,9 @@ object NetworkModule {
     }
 
     suspend fun downloadAudioFile(url: String, targetFile: File): Result<Long> = withContext(Dispatchers.IO) {
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
         try {
             targetFile.parentFile?.mkdirs()
-            val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
             val request = Request.Builder().url(url).build()
             okHttpClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -92,9 +92,13 @@ object NetworkModule {
                 }
             }
             if (targetFile.exists()) targetFile.delete()
-            tempFile.renameTo(targetFile)
+            if (!tempFile.renameTo(targetFile)) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
             Result.success(targetFile.length())
         } catch (e: Exception) {
+            runCatching { if (tempFile.exists()) tempFile.delete() }
             Result.failure(e)
         }
     }

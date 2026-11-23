@@ -4,8 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
+import androidx.core.net.toUri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Check
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Engineering
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SupportAgent
 import androidx.compose.material.icons.filled.Verified
@@ -93,7 +95,9 @@ fun AboutDeveloperScreen(
     val s = LocalAppStrings.current
     val context = LocalContext.current
     val supportPhone = stringResource(id = R.string.support_phone_number).trim()
+    val developerWebsite = stringResource(id = R.string.developer_website_url).trim()
     var phoneCopied by remember { mutableStateOf(false) }
+    var websiteCopied by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -185,7 +189,7 @@ fun AboutDeveloperScreen(
                         .border(1.5.dp, GoldRoyal.copy(alpha = 0.7f), CircleShape)
                 ) {
                     Image(
-                        painter = painterResource(id = R.drawable.soufian_emblem),
+                        painter = painterResource(id = R.drawable.img_al_hidaya_emblem),
                         contentDescription = s.appName,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -426,8 +430,17 @@ fun AboutDeveloperScreen(
                         ) {
                             Button(
                                 onClick = {
-                                    val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$supportPhone"))
-                                    context.startActivity(dialIntent)
+                                    try {
+                                        val dialIntent = Intent(Intent.ACTION_DIAL, "tel:$supportPhone".toUri()).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(dialIntent)
+                                    } catch (_: Exception) {
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        cm?.setPrimaryClip(ClipData.newPlainText("Support Phone", supportPhone))
+                                        phoneCopied = true
+                                        Toast.makeText(context, s.copiedPhoneNotice, Toast.LENGTH_SHORT).show()
+                                    }
                                 },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = EmeraldPrimary,
@@ -450,8 +463,8 @@ fun AboutDeveloperScreen(
 
                             OutlinedButton(
                                 onClick = {
-                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                    cm.setPrimaryClip(ClipData.newPlainText("Support Phone", supportPhone))
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    cm?.setPrimaryClip(ClipData.newPlainText("Support Phone", supportPhone))
                                     phoneCopied = true
                                     Toast.makeText(context, s.copiedPhoneNotice, Toast.LENGTH_SHORT).show()
                                 },
@@ -500,7 +513,142 @@ fun AboutDeveloperScreen(
                 }
             }
 
-            // 3. Mandatory Informational Badge Disclaimer Card
+            // 3. Developer Official Website Card
+            if (developerWebsite.isNotBlank()) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("developer_website_card"),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.2.dp, GoldRoyal.copy(alpha = 0.55f)),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(42.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        Brush.linearGradient(listOf(EmeraldDeep, EmeraldPrimary))
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.Language,
+                                    contentDescription = s.developerWebsiteTitle,
+                                    tint = GoldChampagne,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Text(
+                                text = s.developerWebsiteTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                            border = BorderStroke(1.dp, GoldRoyal.copy(alpha = 0.45f))
+                        ) {
+                            CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
+                                Text(
+                                    text = developerWebsite,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Center,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 12.dp, horizontal = 14.dp)
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    try {
+                                        val webIntent = Intent(Intent.ACTION_VIEW, developerWebsite.toUri()).apply {
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        context.startActivity(webIntent)
+                                    } catch (_: Exception) {
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        cm?.setPrimaryClip(ClipData.newPlainText("Developer Website", developerWebsite))
+                                        websiteCopied = true
+                                        Toast.makeText(context, s.copiedWebsiteNotice, Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = EmeraldPrimary,
+                                    contentColor = Color.White
+                                ),
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("visit_website_button")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    text = s.visitWebsiteLabel,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+
+                            OutlinedButton(
+                                onClick = {
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    cm?.setPrimaryClip(ClipData.newPlainText("Developer Website", developerWebsite))
+                                    websiteCopied = true
+                                    Toast.makeText(context, s.copiedWebsiteNotice, Toast.LENGTH_SHORT).show()
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                border = BorderStroke(1.dp, GoldRoyal),
+                                modifier = Modifier
+                                    .height(48.dp)
+                                    .testTag("copy_website_button")
+                            ) {
+                                Icon(
+                                    imageVector = if (websiteCopied) Icons.Filled.Check else Icons.Filled.ContentCopy,
+                                    contentDescription = s.copyWebsiteLabel,
+                                    tint = GoldRoyal,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(6.dp))
+                                Text(s.copyWebsiteLabel, color = MaterialTheme.colorScheme.onSurface)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. Mandatory Informational Badge Disclaimer Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
